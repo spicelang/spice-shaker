@@ -20,8 +20,5 @@ jobs:
       - name: Setup Spice
         uses: spicelang/spice-setup-action@v1
 
-      - name: Setup Mold
-        uses: rui314/setup-mold@v1
-
       - name: Run tests
-        run: spice run ./test/spice-shaker-test.spice
+        run: ./run-tests.sh

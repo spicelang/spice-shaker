@@ -1,0 +1,41 @@
+import "std/io/cli-parser";
+import "std/io/cli-subcommand";
+import "std/io/cli-option";
+
+public type CliOptions struct {
+  string dependencyName
+  bool install = false
+  bool uninstall = false
+  bool installFromGitHub = false
+}
+
+public p CliOptions.ctor() {}
+
+public type Driver struct {
+  CliParser parser
+  CliOptions options
+}
+
+public p Driver.ctor() {
+  this.parser = CliParser("Spice Shaker", "Official package manager for the Spice programming language");
+  this.parser.setVersion("v0.1.0");
+  this.parser.setFooter("Copyright (c) Marc Auberer 2021-2024");
+}
+
+public p Driver.addDependencyNameOption(CliSubcommand& subcommand) {
+  CliOption<string>& dependency = subcommand.addOption("<dependency-name>", this.options.dependencyName, "Dependency name");
+  //dependency.setRequired();
+}
+
+public f<int> Driver.parse(int argc, string[] argv) {
+  // Install subcommand
+  CliSubcommand& install = this.parser.addSubcommand("install", "Install a dependency");
+  this.addDependencyNameOption(install);
+  CliOption<bool>& optionGitHub = install.addFlag("--github", this.options.installFromGitHub, "Install a dependency from GitHub");
+
+  // Uninstall subcommand
+  CliSubcommand& uninstall = this.parser.addSubcommand("uninstall", "Uninstall a dependency");
+  this.addDependencyNameOption(uninstall);
+
+  return this.parser.parse(argc, argv);
+}

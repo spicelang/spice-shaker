@@ -1,27 +1,6 @@
-import "std/io/cli-parser";
-import "std/io/cli-subcommand";
-
-type CliOptions struct {
-  bool install = false
-  bool uninstall = false
-  bool installFromGitHub = false
-}
-
-p parsingComplete() {
-  printf("Parsing complete!\n");
-}
+import "driver";
 
 f<int> main(int argc, string[] argv) {
-  CliParser parser = CliParser("Spice Shaker", "Official package manager for the Spice programming language");
-  parser.setVersion("v0.1.0");
-  parser.setFooter("Copyright (c) Marc Auberer 2021-2023");
-  parser.setRootCallback();
-
-  CliOptions options;
-  
-  // Install subcommand
-  CliSubcommand& install = parser.addSubcommand("install", cliOptions.install, "Install a dependency");
-  CliOption<bool>& optionGitHub = install.addFlag("--github", cliOptions.installFromGitHub, "Install a dependency from GitHub");
-
-  return parser.parse(argc, argv);
+  Driver driver;
+  return driver.parse(argc, argv);
 }
