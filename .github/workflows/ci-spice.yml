@@ -21,4 +21,6 @@ jobs:
         uses: spicelang/spice-setup-action@v1
 
       - name: Run tests
-        run: ./run-tests.sh
+        run: |
+          chmod +x run-tests.sh
+          ./run-tests.sh
