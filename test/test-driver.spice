@@ -10,7 +10,7 @@ f<bool> testRootCommand() {
 
   // Help text
   dyn argv = ["spice-shaker", "--help"];
-  int argc = (int) len(argv);
+  int argc = cast<int>(len(argv));
   assert driver.parse(argc, argv) == EXIT_SUCCESS;
 
   return true;
@@ -23,7 +23,7 @@ f<bool> testInstallSubcommand() {
 
   // Help text
   dyn argv = ["spice-shaker", "install", "--help"];
-  int argc = (int) len(argv);
+  int argc = cast<int>(len(argv));
   assert driver.parse(argc, argv) == EXIT_SUCCESS;
 
   return true;
@@ -36,7 +36,7 @@ f<bool> testUninstallSubcommand() {
 
   // Help text
   dyn argv = ["spice-shaker", "uninstall", "--help"];
-  int argc = (int) len(argv);
+  int argc = cast<int>(len(argv));
   assert driver.parse(argc, argv) == EXIT_SUCCESS;
 
   return true;
