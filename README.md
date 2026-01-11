@@ -22,4 +22,4 @@ Please visit the documentation at [spicelang.com](https://www.spicelang.com).
 ## Contribute to the project
 If you want to contribute to this project, please ensure you comply with the [contribution guidelines](./CONTRIBUTING.md).
 
-© ChilliBits 2022-2024
+© ChilliBits 2022-2026
