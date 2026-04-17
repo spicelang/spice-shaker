@@ -13,5 +13,4 @@ updates:
       - spicelang/compiler-team
       - spicelang/stdlib-team
     assignees:
-      - spicelang/compiler-team
-      - spicelang/stdlib-team
+      - marcauberer
