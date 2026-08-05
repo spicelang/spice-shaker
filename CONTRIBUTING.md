@@ -1,5 +1,5 @@
 # Contributing
-Compose Generator is a community-driven project. This means that we are open for feature requests or suggestions for improvement.
+Spice Shaker is a community-driven project. This means that we are open for feature requests or suggestions for improvement.
 Apart from that, feel free to fork this project and send us some code contributions via pull request.
 
 In every case please read the [Code of Conduct](https://github.com/spicelang/spice-shaker/blob/main/CODE_OF_CONDUCT.md) before contributing.
