@@ -1,41 +1,108 @@
 import "std/io/cli-parser";
 import "std/io/cli-subcommand";
 import "std/io/cli-option";
+import "./commands";
+
+public const string SHAKER_VERSION = "v0.1.0";
 
 public type CliOptions struct {
-  string dependencyName
-  bool install = false
-  bool uninstall = false
-  bool installFromGitHub = false
+    String dependencyName
+    String versionConstraint
+    String query
+    bool github = false
+    bool dev = false
 }
 
 public p CliOptions.ctor() {}
 
 public type Driver struct {
-  CliParser parser
-  CliOptions options
+    CliParser parser
+    CliOptions options
+    int exitCode = 0
 }
 
 public p Driver.ctor() {
-  this.parser = CliParser("Spice Shaker", "Official package manager for the Spice programming language");
-  this.parser.setVersion("v0.1.0");
-  this.parser.setFooter("Copyright (c) Marc Auberer 2021-2026");
+    Driver* self = this;
+    this.parser = CliParser("Spice Shaker", "Official package manager for the Spice programming language");
+    this.parser.setVersion(SHAKER_VERSION);
+    this.parser.setFooter("Copyright (c) Marc Auberer 2021-2026");
 
-  // Install subcommand
-  CliSubcommand& install = this.parser.addSubcommand("install", "Install a dependency");
-  this.addDependencyNameOption(install);
-  install.addFlag("--github", this.options.installFromGitHub, "Install a dependency from GitHub");
+    // Init subcommand
+    CliSubcommand& init = this.parser.addSubcommand("init", "Create a spice.json in the current directory");
+    init.setCallback(p() {
+        self.exitCode = runInit();
+    });
 
-  // Uninstall subcommand
-  CliSubcommand& uninstall = this.parser.addSubcommand("uninstall", "Uninstall a dependency");
-  this.addDependencyNameOption(uninstall);
+    // Install subcommand
+    CliSubcommand& install = this.parser.addSubcommand("install", "Install a dependency and add it to spice.json");
+    this.addDependencyNameOption(install);
+    install.addOption("--version", this.options.versionConstraint, "Version constraint (e.g. ^1.2.0), or a git ref with --github");
+    install.addFlag("--github", this.options.github, "Install a dependency from GitHub (<dependency-name> is owner/repo)");
+    install.addFlag("--dev", this.options.dev, "Add the dependency to devDependencies");
+    install.setCallback(p() {
+        self.exitCode = runInstall(self.options.dependencyName, self.options.versionConstraint, self.options.github, self.options.dev);
+    });
+
+    // Uninstall subcommand
+    CliSubcommand& uninstall = this.parser.addSubcommand("uninstall", "Uninstall a dependency and remove it from spice.json");
+    this.addDependencyNameOption(uninstall);
+    uninstall.setCallback(p() {
+        self.exitCode = runUninstall(self.options.dependencyName);
+    });
+
+    // Sync subcommand
+    CliSubcommand& syncCmd = this.parser.addSubcommand("sync", "Install all dependencies of spice.json (honors spice.lock.json)");
+    syncCmd.setCallback(p() {
+        self.exitCode = runSync();
+    });
+
+    // Update subcommand
+    CliSubcommand& update = this.parser.addSubcommand("update", "Update all dependencies to the newest versions allowed by spice.json");
+    update.setCallback(p() {
+        self.exitCode = runUpdate();
+    });
+
+    // List subcommand
+    CliSubcommand& list = this.parser.addSubcommand("list", "Show the installed dependencies as a tree");
+    list.setCallback(p() {
+        self.exitCode = runList();
+    });
+
+    // Search subcommand
+    CliSubcommand& search = this.parser.addSubcommand("search", "Search for packages in the registry");
+    search.addOption("query", this.options.query, "Search term");
+    search.setCallback(p() {
+        self.exitCode = runSearch(self.options.query, 1l);
+    });
+
+    // Info subcommand
+    CliSubcommand& info = this.parser.addSubcommand("info", "Show details and versions of a package in the registry");
+    this.addDependencyNameOption(info);
+    info.setCallback(p() {
+        self.exitCode = runInfo(self.options.dependencyName);
+    });
 }
 
 public p Driver.addDependencyNameOption(CliSubcommand& subcommand) {
-  CliOption<string>& dependency = subcommand.addOption("<dependency-name>", this.options.dependencyName, "Dependency name");
-  //dependency.setRequired();
+    subcommand.addOption("dependency-name", this.options.dependencyName, "Dependency name");
 }
 
 public f<int> Driver.parse(int argc, string[] argv) {
-  return this.parser.parse(argc, argv);
+    const int parseResult = this.parser.parse(argc, argv);
+    if parseResult != 0 { return parseResult; }
+    return this.exitCode;
+}
+
+#[test]
+f<bool> testHelpOfAllCommands() {
+    const string[8] commands = ["init", "install", "uninstall", "sync", "update", "list", "search", "info"];
+    for unsigned int i = 0u; i < 8u; i++ {
+        Driver driver;
+        string[3] argv = ["spice-shaker", commands[i], "--help"];
+        assert driver.parse(3, argv) == 0;
+    }
+    Driver rootDriver;
+    string[2] rootArgv = ["spice-shaker", "--help"];
+    assert rootDriver.parse(2, rootArgv) == 0;
+    return true;
 }

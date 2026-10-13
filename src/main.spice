@@ -1,6 +1,6 @@
 import "driver";
 
 f<int> main(int argc, string[] argv) {
-  Driver driver;
-  return driver.parse(argc, argv);
+    Driver driver;
+    return driver.parse(argc, argv);
 }

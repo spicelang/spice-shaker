@@ -1,0 +1,249 @@
+import "std/data/vector";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Small string helpers shared by all other modules
+// ---------------------------------------------------------------------------------------------------------------------
+
+public type KeyValue struct {
+    public String key
+    public String value
+}
+
+public p KeyValue.ctor() {}
+
+public p KeyValue.ctor(const KeyValue& original) {
+    this.key = original.key;
+    this.value = original.value;
+}
+
+/**
+ * Deep-copy assignment, so that entries survive being shifted around inside a vector
+ */
+public p operator=(KeyValue& this, const KeyValue& original) {
+    if &this == &original { return; }
+    this.key = original.key;
+    this.value = original.value;
+}
+
+public p KeyValue.ctor(const String& key, const String& value) {
+    this.key = key;
+    this.value = value;
+}
+
+/**
+ * Convert a signed integer to its decimal representation
+ */
+public f<String> fmtLong(long value) {
+    if value == 0l { return String("0"); }
+    String digits;
+    bool negative = value < 0l;
+    // Work on the negative magnitude, so LONG_MIN does not overflow
+    long rest = negative ? value : -value;
+    while rest != 0l {
+        const long digit = -(rest % 10l);
+        digits.append(cast<char>(48 + cast<int>(digit)));
+        rest /= 10l;
+    }
+    if negative { digits.append('-'); }
+    digits.reverse();
+    return digits;
+}
+
+/**
+ * Parse a decimal integer. Returns the fallback if the input is empty or not numeric.
+ */
+public f<long> parseLong(const String& input, long fallback = 0l) {
+    const unsigned long len = input.getLength();
+    if len == 0l { return fallback; }
+    unsigned long i = 0l;
+    bool negative = false;
+    if input[0l] == '-' { negative = true; i = 1l; }
+    if i >= len || len - i > 18l { return fallback; }
+    long acc = 0l;
+    while i < len {
+        const char c = input[i];
+        if c < '0' || c > '9' { return fallback; }
+        acc = acc * 10l + cast<long>(cast<int>(c) - 48);
+        i++;
+    }
+    return negative ? -acc : acc;
+}
+
+/**
+ * Split by a separator character. Empty parts are kept.
+ */
+public f<Vector<String>> split(const String& input, char separator) {
+    Vector<String> parts;
+    String current;
+    const unsigned long len = input.getLength();
+    for unsigned long i = 0l; i < len; i++ {
+        const char c = input[i];
+        if c == separator {
+            parts.pushBack(current);
+            current = String("");
+        } else {
+            current.append(c);
+        }
+    }
+    parts.pushBack(current);
+    return parts;
+}
+
+/**
+ * Cut off the first characters and return the rest
+ */
+public f<String> tail(const String& input, unsigned long from) {
+    if from >= input.getLength() { return String(""); }
+    return input.getSubstring(from);
+}
+
+public f<String> lower(const String& input) {
+    String acc;
+    for unsigned long i = 0l; i < input.getLength(); i++ {
+        char c = input[i];
+        if c >= 'A' && c <= 'Z' { c = cast<char>(cast<int>(c) + 32); }
+        acc.append(c);
+    }
+    return acc;
+}
+
+public f<bool> isLowerAlnum(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
+/**
+ * Package names on the registry: lower-case letters, digits, '-' and '_', starting with a letter or digit.
+ * Everything that ends up in a shell command or a path has to pass this check.
+ */
+public f<bool> isValidPackageName(const String& name) {
+    const unsigned long len = name.getLength();
+    if len == 0l || len > 64l || !isLowerAlnum(name[0l]) { return false; }
+    for unsigned long i = 1l; i < len; i++ {
+        const char c = name[i];
+        if !isLowerAlnum(c) && c != '-' && c != '_' { return false; }
+    }
+    return true;
+}
+
+/**
+ * A GitHub user, organization or repository name: letters, digits, '-', '_' and '.'
+ */
+public f<bool> isValidGithubName(const String& name) {
+    const unsigned long len = name.getLength();
+    if len == 0l || len > 100l || name == "." || name == ".." { return false; }
+    for unsigned long i = 0l; i < len; i++ {
+        const char c = name[i];
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '_' && c != '.' { return false; }
+    }
+    return true;
+}
+
+/**
+ * A git ref (tag, branch or sha) that is safe to use in a URL and a shell command
+ */
+public f<bool> isValidGitRef(const String& ref) {
+    const unsigned long len = ref.getLength();
+    if len == 0l || len > 100l { return false; }
+    for unsigned long i = 0l; i < len; i++ {
+        const char c = ref[i];
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '_' && c != '.' && c != '/' { return false; }
+    }
+    return true;
+}
+
+public f<bool> containsVersionChars(const String& version) {
+    const unsigned long len = version.getLength();
+    if len == 0l || len > 64l { return false; }
+    for unsigned long i = 0l; i < len; i++ {
+        const char c = version[i];
+        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '.' && c != '+' { return false; }
+    }
+    return true;
+}
+
+/**
+ * Percent-encode a query value (RFC 3986 unreserved characters stay as they are)
+ */
+public f<String> encodeQuery(const String& input) {
+    const string hex = "0123456789ABCDEF";
+    String acc;
+    const unsigned long len = input.getLength();
+    for unsigned long i = 0l; i < len; i++ {
+        const char c = input[i];
+        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                           c == '-' || c == '_' || c == '.' || c == '~';
+        if plain {
+            acc.append(c);
+        } else {
+            const int code = cast<int>(c) & 255;
+            acc.append('%');
+            acc.append(hex[code / 16]);
+            acc.append(hex[code % 16]);
+        }
+    }
+    return acc;
+}
+
+public f<String> head(const String& input, unsigned long count) {
+    if count >= input.getLength() { return input; }
+    return input.getSubstring(0l, cast<long>(count));
+}
+
+/**
+ * A version constraint consists of digits, letters (for pre-releases and wildcards) and the operator characters
+ */
+public f<bool> containsConstraintChars(const String& text) {
+    if text.isEmpty() { return false; }
+    for unsigned long i = 0l; i < text.getLength(); i++ {
+        const char c = text[i];
+        const bool word = isLowerAlnum(c) || (c >= 'A' && c <= 'Z');
+        if !word && c != '*' && c != '^' && c != '~' && c != '.' && c != ',' && c != ' ' && c != '>' && c != '<' && c != '=' && c != '-' && c != '+' { return false; }
+    }
+    return true;
+}
+
+public f<String> padRight(const String& input, unsigned long width) {
+    String acc = input;
+    while acc.getLength() < width { acc.append(' '); }
+    return acc;
+}
+
+public f<String> shortened(const String& input, unsigned long maxLength) {
+    if input.getLength() <= maxLength { return input; }
+    return input.getSubstring(0l, cast<long>(maxLength) - 3l) + "...";
+}
+
+#[test]
+f<bool> testNumbers() {
+    assert fmtLong(0l) == "0";
+    assert fmtLong(-1204l) == "-1204";
+    assert parseLong(String("42")) == 42l;
+    assert parseLong(String("x"), -1l) == -1l;
+    return true;
+}
+
+#[test]
+f<bool> testNameValidation() {
+    assert isValidPackageName(String("json-parser_2"));
+    assert !isValidPackageName(String("Json"));
+    assert !isValidPackageName(String("a b"));
+    assert !isValidPackageName(String("$(rm)"));
+    assert isValidGithubName(String("spice.lang"));
+    assert !isValidGithubName(String(".."));
+    assert isValidGitRef(String("feature/x-1.2"));
+    assert !isValidGitRef(String("a;b"));
+    return true;
+}
+
+#[test]
+f<bool> testSplitAndEncode() {
+    const Vector<String> parts = split(String("a/b//c"), '/');
+    assert parts.getSize() == 4l;
+    assert parts.get(2l) == "";
+    assert encodeQuery(String("a b&c")) == "a%20b%26c";
+    assert shortened(String("abcdefghij"), 8l) == "abcde...";
+    return true;
+}

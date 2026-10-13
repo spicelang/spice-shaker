@@ -1,0 +1,359 @@
+import "std/data/vector";
+import "std/text/json/json-value";
+import "std/text/json/json-parser";
+import "std/text/json/json-serializer";
+import "./util";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// JSON on top of the Spice std (std/text/json): parsing, the value tree and serializing come from there.
+//
+// This file adds two thin helpers, so the rest of the code stays free of error handling noise:
+//   * `JV`, a read handle. Accessing something that does not exist (or has another type) reads as null / "" / 0, whereas the
+//     std accessors panic on a wrong kind. A handle also knows its position in its parent, which allows iteration.
+//   * `JsonWriter`, a streaming-style builder (beginObject, key, str, ...) on top of the std value tree.
+//
+// Limits of the std parser worth knowing: it reads all numbers as doubles (exact up to 2^53) and does not understand
+// "\uXXXX" escapes.
+// ---------------------------------------------------------------------------------------------------------------------
+
+public type JV struct {
+    public JsonValue* node = nil<JsonValue*>
+    public JsonValue* parent = nil<JsonValue*>
+    public unsigned long index = 0l
+}
+
+/**
+ * Parse a JSON text. The returned handle is the root; check exists() for errors. The tree is intentionally never freed,
+ * since the process is short-lived.
+ */
+public f<JV> parseDoc(const String& text) {
+    JV handle;
+    Result<JsonValue*> parsed = parseJson(text);
+    if parsed.isOk() { handle.node = parsed.unwrap(); }
+    return handle;
+}
+
+public f<JV> missingJson() {
+    JV handle;
+    return handle;
+}
+
+f<JV> childOf(JsonValue* container, unsigned long idx) {
+    JV handle;
+    if container == nil<JsonValue*> { return handle; }
+    if container.isArray() && idx < container.getArraySize() {
+        handle.node = container.getArrayItem(idx);
+    } else if container.isObject() && idx < container.getObjectSize() {
+        handle.node = container.getObjectValue(idx);
+    } else {
+        return handle;
+    }
+    handle.parent = container;
+    handle.index = idx;
+    return handle;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------------------------------------------------
+
+public f<bool> JV.exists() { return this.node != nil<JsonValue*>; }
+public f<bool> JV.isNull() { return this.node == nil<JsonValue*> || this.node.isNull(); }
+public f<bool> JV.isArray() { return this.node != nil<JsonValue*> && this.node.isArray(); }
+public f<bool> JV.isObject() { return this.node != nil<JsonValue*> && this.node.isObject(); }
+public f<bool> JV.isString() { return this.node != nil<JsonValue*> && this.node.isString(); }
+
+public f<unsigned long> JV.size() {
+    if this.node == nil<JsonValue*> { return 0l; }
+    if this.node.isArray() { return this.node.getArraySize(); }
+    if this.node.isObject() { return this.node.getObjectSize(); }
+    return 0l;
+}
+
+public f<JV> JV.at(unsigned long position) {
+    return childOf(this.node, position);
+}
+
+public f<JV> JV.first() {
+    return childOf(this.node, 0l);
+}
+
+/**
+ * The next sibling: together with first() this iterates arrays and objects
+ */
+public f<JV> JV.after() {
+    return childOf(this.parent, this.index + 1l);
+}
+
+public f<JV> JV.get(string key) {
+    if this.node == nil<JsonValue*> || !this.node.isObject() || !this.node.hasField(key) { return missingJson(); }
+    JV handle;
+    handle.node = this.node.getField(key);
+    handle.parent = this.node;
+    // The position is only needed for iteration, so look it up lazily by key identity
+    for unsigned long i = 0l; i < this.node.getObjectSize(); i++ {
+        if this.node.getObjectValue(i) == handle.node { handle.index = i; break; }
+    }
+    return handle;
+}
+
+/**
+ * Key of an object member
+ */
+public f<String> JV.keyName() {
+    if this.parent == nil<JsonValue*> || !this.parent.isObject() { return String(""); }
+    return this.parent.getObjectKey(this.index);
+}
+
+/**
+ * Text content: the string itself, the literal for numbers and booleans, empty for null and missing values
+ */
+public f<String> JV.str() {
+    if this.node == nil<JsonValue*> { return String(""); }
+    if this.node.isString() { return this.node.getString(); }
+    if this.node.isBool() { return this.node.getBool() ? String("true") : String("false"); }
+    if this.node.isNumber() { return fmtLong(this.num()); }
+    return String("");
+}
+
+public f<long> JV.num() {
+    if this.node == nil<JsonValue*> { return 0l; }
+    if this.node.isNumber() {
+        if this.node.hasUnsignedIntegerValue() { return cast<long>(this.node.getUnsignedInteger()); }
+        return cast<long>(this.node.getNumber());
+    }
+    if this.node.isString() { return parseLong(this.node.getString()); }
+    return 0l;
+}
+
+public f<bool> JV.truthy() {
+    if this.node == nil<JsonValue*> { return false; }
+    if this.node.isBool() { return this.node.getBool(); }
+    if this.node.isNumber() { return this.num() != 0l; }
+    return false;
+}
+
+public f<String> JV.getStr(string key) {
+    JV child = this.get(key);
+    return child.str();
+}
+
+public f<long> JV.getNum(string key) {
+    JV child = this.get(key);
+    return child.num();
+}
+
+public f<bool> JV.getBool(string key) {
+    JV child = this.get(key);
+    return child.truthy();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------------------------------------------------
+
+public type JsonWriter struct {
+    public Vector<JsonValue*> stack
+    public JsonValue* root = nil<JsonValue*>
+    public String pendingKey
+}
+
+p JsonWriter.add(JsonValue* value) {
+    if this.stack.getSize() == 0l {
+        this.root = value;
+        return;
+    }
+    JsonValue* top = this.stack.get(this.stack.getSize() - 1l);
+    if top.isObject() { top.addObjectField(this.pendingKey, value); }
+    else { top.addArrayItem(value); }
+}
+
+public p JsonWriter.beginObject() {
+    JsonValue* value = __new<JsonValue>(JsonValueKind::JSON_OBJECT);
+    this.add(value);
+    this.stack.pushBack(value);
+}
+
+public p JsonWriter.endObject() { this.stack.popBack(); }
+
+public p JsonWriter.beginArray() {
+    JsonValue* value = __new<JsonValue>(JsonValueKind::JSON_ARRAY);
+    this.add(value);
+    this.stack.pushBack(value);
+}
+
+public p JsonWriter.endArray() { this.stack.popBack(); }
+
+public p JsonWriter.key(string name) { this.pendingKey = String(name); }
+public p JsonWriter.key(const String& name) { this.pendingKey = name; }
+
+public p JsonWriter.str(const String& value) {
+    JsonValue* node = __new<JsonValue>(value);
+    this.add(node);
+}
+
+public p JsonWriter.num(long value) {
+    JsonValue* node = nil<JsonValue*>;
+    if value >= 0l { node = __new<JsonValue>(cast<unsigned long>(value)); }
+    else { node = __new<JsonValue>(0.0 + value); }
+    this.add(node);
+}
+
+public p JsonWriter.boolean(bool value) {
+    JsonValue* node = __new<JsonValue>(value);
+    this.add(node);
+}
+
+public p JsonWriter.nullValue() {
+    JsonValue* node = __new<JsonValue>();
+    this.add(node);
+}
+
+/**
+ * Add a finished value tree (e.g. the root of another writer) at the current position
+ */
+public p JsonWriter.attach(JsonValue* value) { this.add(value); }
+
+public f<JsonValue*> JsonWriter.takeRoot() { return this.root; }
+
+public p JsonWriter.kStr(string name, const String& value) {
+    this.key(name);
+    this.str(value);
+}
+
+public p JsonWriter.kStr(const String& name, const String& value) {
+    this.key(name);
+    this.str(value);
+}
+
+public p JsonWriter.kNum(string name, long value) {
+    this.key(name);
+    this.num(value);
+}
+
+public p JsonWriter.kBool(string name, bool value) {
+    this.key(name);
+    this.boolean(value);
+}
+
+public f<String> JsonWriter.finish() {
+    if this.root == nil<JsonValue*> { return String("null"); }
+    JsonSerializer serializer = JsonSerializer(false);
+    return serializer.serialize(this.root);
+}
+
+public f<bool> JV.isBool() { return this.node != nil<JsonValue*> && this.node.isBool(); }
+public f<bool> JV.isNumber() { return this.node != nil<JsonValue*> && this.node.isNumber(); }
+
+/**
+ * Serialize with indentation, followed by a line break (for files meant to be read by humans)
+ */
+public f<String> JsonWriter.finishPretty() {
+    if this.root == nil<JsonValue*> { return String("null\n"); }
+    JsonSerializer serializer = JsonSerializer(true);
+    return serializer.serialize(this.root) + "\n";
+}
+
+/**
+ * Write a value of a parsed document at the current position of the writer
+ */
+public p JsonWriter.copy(JV source) {
+    if source.isObject() {
+        this.beginObject();
+        for JV member = source.first(); member.exists(); member = member.after() {
+            this.key(member.keyName());
+            this.copy(member);
+        }
+        this.endObject();
+    } else if source.isArray() {
+        this.beginArray();
+        for JV item = source.first(); item.exists(); item = item.after() { this.copy(item); }
+        this.endArray();
+    } else if source.isString() {
+        this.str(source.str());
+    } else if source.isBool() {
+        this.boolean(source.truthy());
+    } else if source.isNumber() {
+        this.num(source.num());
+    } else {
+        this.nullValue();
+    }
+}
+
+#[test]
+f<bool> testJsonParse() {
+    JV doc = parseDoc(String("{\"a\": 1, \"b\": [true, null, \"x\\nyé😀\"], \"c\": {\"d\": -42.5}, \"e\": \"\"}"));
+    assert doc.exists();
+    assert doc.getNum("a") == 1l;
+    JV arr = doc.get("b");
+    assert arr.size() == 3l;
+    JV first = arr.at(0l);
+    assert first.truthy();
+    JV second = arr.at(1l);
+    assert second.isNull();
+    JV third = arr.at(2l);
+    assert third.str() == "x\nyé😀";
+    JV c = doc.get("c");
+    assert c.getNum("d") == -42l;
+    assert doc.getStr("e") == "";
+    JV missing = doc.get("missing");
+    assert !missing.exists();
+    assert missing.getStr("deep") == "";
+    // Wrong types read as empty instead of panicking
+    JV a = doc.get("a");
+    assert a.getStr("x") == "";
+    assert arr.getNum("x") == 0l;
+    return true;
+}
+
+#[test]
+f<bool> testJsonInvalid() {
+    JV a = parseDoc(String("{\"a\": "));
+    assert !a.exists();
+    JV b = parseDoc(String("[1, 2"));
+    assert !b.exists();
+    JV c = parseDoc(String("{} x"));
+    assert !c.exists();
+    JV d = parseDoc(String(" [ ] "));
+    assert d.isArray();
+    return true;
+}
+
+#[test]
+f<bool> testJsonIterate() {
+    JV doc = parseDoc(String("[{\"n\":\"a\"},{\"n\":\"b\"},{\"n\":\"c\"}]"));
+    String names;
+    for JV item = doc.first(); item.exists(); item = item.after() { names += item.getStr("n"); }
+    assert names == "abc";
+
+    JV object = parseDoc(String("{\"x\":\"1\",\"y\":\"2\"}"));
+    String keys;
+    for JV member = object.first(); member.exists(); member = member.after() { keys += member.keyName() + "=" + member.str() + ";"; }
+    assert keys == "x=1;y=2;";
+    JV y = object.get("y");
+    JV afterY = y.after();
+    assert !afterY.exists();
+    return true;
+}
+
+#[test]
+f<bool> testJsonWriter() {
+    JsonWriter w;
+    w.beginObject();
+    w.kStr("name", String("a\"b"));
+    w.kNum("n", 12l);
+    w.kNum("neg", -5l);
+    w.key("list");
+    w.beginArray();
+    w.num(1l);
+    w.str(String("x"));
+    w.beginObject();
+    w.kBool("ok", true);
+    w.endObject();
+    w.endArray();
+    w.key("nothing");
+    w.nullValue();
+    w.endObject();
+    assert w.finish() == "{\"name\":\"a\\\"b\",\"n\":12,\"neg\":-5,\"list\":[1,\"x\",{\"ok\":true}],\"nothing\":null}";
+    return true;
+}

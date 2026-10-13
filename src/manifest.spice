@@ -1,0 +1,362 @@
+import "std/data/vector";
+import "std/io/file";
+import "./semver";
+import "./util";
+import "./json";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The project manifest (spice.json, the format is defined by the Spice Rack registry) and the lock file (spice.lock.json)
+// ---------------------------------------------------------------------------------------------------------------------
+
+public const string MANIFEST_FILE = "spice.json";
+public const string LOCK_FILE = "spice.lock.json";
+public const string PACKAGES_DIR = "spice_packages";
+
+// Prefix of dependency constraints that point to a GitHub repository instead of the registry: "github:owner/repo#ref"
+public const string GITHUB_PREFIX = "github:";
+
+/**
+ * Contents of spice.json. Fields shaker does not know are preserved when the file is written back.
+ */
+public type Manifest struct {
+    public JV doc
+    public String name
+    public String version
+    public Vector<KeyValue> dependencies
+    public Vector<KeyValue> devDependencies
+}
+
+public p Manifest.ctor() {
+    this.version = String("0.1.0");
+}
+
+/**
+ * Replace the entry at an index (value) or remove it (remove = true). The vectors are rebuilt instead of shifted in place.
+ */
+public p rebuildWithout(Vector<KeyValue>& list, unsigned long skip, const String& newValue, bool remove) {
+    Vector<KeyValue> rebuilt;
+    for unsigned long i = 0l; i < list.getSize(); i++ {
+        if i != skip { rebuilt.pushBack(list.get(i)); continue; }
+        if !remove { rebuilt.pushBack(KeyValue(list.get(i).key, newValue)); }
+    }
+    list = rebuilt;
+}
+
+public f<long> indexOfKey(const Vector<KeyValue>& list, const String& key) {
+    for unsigned long i = 0l; i < list.getSize(); i++ {
+        if list.get(i).key == key { return cast<long>(i); }
+    }
+    return -1l;
+}
+
+public p readDependencies(JV object, Vector<KeyValue>& target) {
+    for JV member = object.first(); member.exists(); member = member.after() {
+        target.pushBack(KeyValue(member.keyName(), member.str()));
+    }
+}
+
+/**
+ * Read spice.json from the current directory. Returns false if there is none or it is not valid JSON.
+ */
+public f<bool> Manifest.load(string path = MANIFEST_FILE) {
+    Result<String> content = readFile(path);
+    if content.isErr() { return false; }
+    this.doc = parseDoc(content.unwrap());
+    if !this.doc.isObject() { return false; }
+    this.name = this.doc.getStr("name");
+    const String version = this.doc.getStr("version");
+    if !version.isEmpty() { this.version = version; }
+    readDependencies(this.doc.get("dependencies"), this.dependencies);
+    readDependencies(this.doc.get("devDependencies"), this.devDependencies);
+    return true;
+}
+
+/**
+ * Set a dependency (or replace its constraint). Returns true if the manifest changed.
+ */
+public f<bool> Manifest.setDependency(const String& name, const String& constraint, bool dev) {
+    // A package lives in exactly one of the two sections
+    bool changed = false;
+    if dev {
+        const long otherIdx = indexOfKey(this.dependencies, name);
+        if otherIdx >= 0l { rebuildWithout(this.dependencies, cast<unsigned long>(otherIdx), name, true); changed = true; }
+        return putDependency(this.devDependencies, name, constraint) || changed;
+    }
+    const long otherIdx = indexOfKey(this.devDependencies, name);
+    if otherIdx >= 0l { rebuildWithout(this.devDependencies, cast<unsigned long>(otherIdx), name, true); changed = true; }
+    return putDependency(this.dependencies, name, constraint) || changed;
+}
+
+f<bool> putDependency(Vector<KeyValue>& target, const String& name, const String& constraint) {
+    const long idx = indexOfKey(target, name);
+    if idx < 0l {
+        target.pushBack(KeyValue(name, constraint));
+        return true;
+    }
+    if target.get(cast<unsigned long>(idx)).value == constraint { return false; }
+    rebuildWithout(target, cast<unsigned long>(idx), constraint, false);
+    return true;
+}
+
+public f<bool> Manifest.removeDependency(const String& name) {
+    bool removed = false;
+    const long idx = indexOfKey(this.dependencies, name);
+    if idx >= 0l { rebuildWithout(this.dependencies, cast<unsigned long>(idx), name, true); removed = true; }
+    const long devIdx = indexOfKey(this.devDependencies, name);
+    if devIdx >= 0l { rebuildWithout(this.devDependencies, cast<unsigned long>(devIdx), name, true); removed = true; }
+    return removed;
+}
+
+public f<String> Manifest.getConstraint(const String& name) {
+    long idx = indexOfKey(this.dependencies, name);
+    if idx >= 0l { return this.dependencies.get(cast<unsigned long>(idx)).value; }
+    idx = indexOfKey(this.devDependencies, name);
+    if idx >= 0l { return this.devDependencies.get(cast<unsigned long>(idx)).value; }
+    return String("");
+}
+
+public f<String> Manifest.serialize() {
+    JsonWriter w;
+    w.beginObject();
+    bool hasName = false;
+    bool hasVersion = false;
+    for JV member = this.doc.first(); member.exists(); member = member.after() {
+        const String key = member.keyName();
+        if key == "dependencies" || key == "devDependencies" { continue; }
+        if key == "name" { hasName = true; }
+        if key == "version" { hasVersion = true; }
+        w.key(key);
+        w.copy(member);
+    }
+    if !hasName && !this.name.isEmpty() { w.kStr("name", this.name); }
+    if !hasVersion { w.kStr("version", this.version); }
+    if this.dependencies.getSize() > 0l {
+        w.key("dependencies");
+        w.beginObject();
+        for unsigned long i = 0l; i < this.dependencies.getSize(); i++ {
+            w.kStr(this.dependencies.get(i).key, this.dependencies.get(i).value);
+        }
+        w.endObject();
+    }
+    if this.devDependencies.getSize() > 0l {
+        w.key("devDependencies");
+        w.beginObject();
+        for unsigned long i = 0l; i < this.devDependencies.getSize(); i++ {
+            w.kStr(this.devDependencies.get(i).key, this.devDependencies.get(i).value);
+        }
+        w.endObject();
+    }
+    w.endObject();
+    return w.finishPretty();
+}
+
+public f<bool> Manifest.save(string path = MANIFEST_FILE) {
+    const String text = this.serialize();
+    Result<bool> written = writeFile(path, text.getRaw());
+    return written.isOk();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Lock file: which version of which package is installed, where it came from and what it depends on
+// ---------------------------------------------------------------------------------------------------------------------
+
+public type LockEntry struct {
+    public String name
+    public String version
+    public String source                      // "registry" or "github"
+    public Vector<String> dependencies        // Names of the packages this one needs
+}
+
+public p LockEntry.ctor() {
+    this.source = String("registry");
+}
+
+public p LockEntry.ctor(const LockEntry& original) {
+    this.name = original.name;
+    this.version = original.version;
+    this.source = original.source;
+    this.dependencies = original.dependencies;
+}
+
+/**
+ * Deep-copy assignment, so that entries survive being shifted around inside a vector
+ */
+public p operator=(LockEntry& this, const LockEntry& original) {
+    if &this == &original { return; }
+    this.name = original.name;
+    this.version = original.version;
+    this.source = original.source;
+    this.dependencies = original.dependencies;
+}
+
+public p LockEntry.ctor(const String& name, const String& version, const String& source) {
+    this.name = name;
+    this.version = version;
+    this.source = source;
+}
+
+public type Lockfile struct {
+    public Vector<LockEntry> entries
+}
+
+public f<long> Lockfile.indexOf(const String& name) {
+    for unsigned long i = 0l; i < this.entries.getSize(); i++ {
+        if this.entries.get(i).name == name { return cast<long>(i); }
+    }
+    return -1l;
+}
+
+public f<bool> Lockfile.contains(const String& name) {
+    return this.indexOf(name) >= 0l;
+}
+
+public f<LockEntry> Lockfile.get(const String& name) {
+    const long idx = this.indexOf(name);
+    if idx < 0l { return LockEntry(); }
+    return this.entries.get(cast<unsigned long>(idx));
+}
+
+public p Lockfile.set(const LockEntry& entry) {
+    const long idx = this.indexOf(entry.name);
+    if idx < 0l { this.entries.pushBack(entry); }
+    else {
+        Vector<LockEntry> rebuilt;
+        for unsigned long i = 0l; i < this.entries.getSize(); i++ {
+            if cast<long>(i) == idx { rebuilt.pushBack(entry); } else { rebuilt.pushBack(this.entries.get(i)); }
+        }
+        this.entries = rebuilt;
+    }
+}
+
+public p Lockfile.drop(const String& name) {
+    const long idx = this.indexOf(name);
+    if idx < 0l { return; }
+    Vector<LockEntry> rebuilt;
+    for unsigned long i = 0l; i < this.entries.getSize(); i++ {
+        if cast<long>(i) != idx { rebuilt.pushBack(this.entries.get(i)); }
+    }
+    this.entries = rebuilt;
+}
+
+public f<bool> Lockfile.load(string path = LOCK_FILE) {
+    Result<String> content = readFile(path);
+    if content.isErr() { return false; }
+    JV doc = parseDoc(content.unwrap());
+    JV packages = doc.get("packages");
+    for JV item = packages.first(); item.exists(); item = item.after() {
+        LockEntry entry = LockEntry(item.keyName(), item.getStr("version"), item.getStr("source"));
+        JV deps = item.get("dependencies");
+        for JV dep = deps.first(); dep.exists(); dep = dep.after() { entry.dependencies.pushBack(dep.str()); }
+        this.entries.pushBack(entry);
+    }
+    return true;
+}
+
+public f<String> Lockfile.serialize() {
+    JsonWriter w;
+    w.beginObject();
+    w.kNum("lockVersion", 1l);
+    w.key("packages");
+    w.beginObject();
+    // Sorted by name, so the file produces small diffs
+    Vector<String> names;
+    for unsigned long i = 0l; i < this.entries.getSize(); i++ { names.pushBack(this.entries.get(i).name); }
+    sortStrings(names);
+    for unsigned long i = 0l; i < names.getSize(); i++ {
+        const LockEntry entry = this.get(names.get(i));
+        w.key(entry.name);
+        w.beginObject();
+        w.kStr("version", entry.version);
+        w.kStr("source", entry.source);
+        w.key("dependencies");
+        w.beginArray();
+        for unsigned long k = 0l; k < entry.dependencies.getSize(); k++ { w.str(entry.dependencies.get(k)); }
+        w.endArray();
+        w.endObject();
+    }
+    w.endObject();
+    w.endObject();
+    return w.finishPretty();
+}
+
+public f<bool> Lockfile.save(string path = LOCK_FILE) {
+    const String text = this.serialize();
+    Result<bool> written = writeFile(path, text.getRaw());
+    return written.isOk();
+}
+
+/**
+ * Insertion sort; the lists of packages are short
+ */
+public p sortStrings(Vector<String>& list) {
+    Vector<String> sorted;
+    for unsigned long i = 0l; i < list.getSize(); i++ {
+        unsigned long pos = 0l;
+        while pos < sorted.getSize() && !isStringBefore(list.get(i), sorted.get(pos)) { pos++; }
+        sorted.insertAt(pos, list.get(i));
+    }
+    list = sorted;
+}
+
+#[test]
+f<bool> testManifestRoundTrip() {
+    Manifest manifest;
+    manifest.doc = parseDoc(String("{\"name\":\"app\",\"license\":\"MIT\",\"dependencies\":{\"a\":\"^1.0.0\"}}"));
+    manifest.name = manifest.doc.getStr("name");
+    JV existing = manifest.doc.get("dependencies");
+    readDependencies(existing, manifest.dependencies);
+    assert manifest.dependencies.getSize() == 1l;
+    const String a = String("a");
+    const String b = String("b");
+    const String t = String("t");
+    const String any = String("*");
+    const String tilde = String("~2.0.0");
+    const String caret = String("^1.0.0");
+    const String oneX = String("1.x");
+    bool changed = manifest.setDependency(b, any, false);
+    assert changed;
+    changed = manifest.setDependency(t, oneX, true);
+    assert changed;
+    changed = manifest.setDependency(b, any, false);
+    assert !changed;
+    changed = manifest.setDependency(b, tilde, false);
+    assert changed;
+    // Moving a package between the sections
+    changed = manifest.setDependency(a, caret, true);
+    assert changed;
+    assert manifest.dependencies.getSize() == 1l && manifest.devDependencies.getSize() == 2l;
+    const String text = manifest.serialize();
+    JV out = parseDoc(text);
+    assert out.getStr("license") == "MIT";
+    JV deps = out.get("dependencies");
+    assert deps.getStr("b") == "~2.0.0";
+    JV devDeps = out.get("devDependencies");
+    assert devDeps.getStr("a") == "^1.0.0";
+    assert manifest.removeDependency(a);
+    assert !manifest.removeDependency(a);
+    assert manifest.getConstraint(t) == "1.x";
+    return true;
+}
+
+#[test]
+f<bool> testLockfileRoundTrip() {
+    Lockfile lock;
+    LockEntry bEntry = LockEntry(String("b"), String("1.0.0"), String("registry"));
+    bEntry.dependencies.pushBack(String("a"));
+    lock.set(bEntry);
+    lock.set(LockEntry(String("a"), String("2.1.0"), String("github")));
+    lock.set(LockEntry(String("a"), String("2.2.0"), String("github")));
+    assert lock.entries.getSize() == 2l;
+    JV out = parseDoc(lock.serialize());
+    JV packages = out.get("packages");
+    JV first = packages.first();
+    assert first.keyName() == "a";
+    assert first.getStr("version") == "2.2.0";
+    JV b = packages.get("b");
+    JV bDeps = b.get("dependencies");
+    JV bFirstDep = bDeps.first();
+    assert bFirstDep.str() == "a";
+    lock.drop(String("a"));
+    assert !lock.contains(String("a")) && lock.contains(String("b"));
+    return true;
+}

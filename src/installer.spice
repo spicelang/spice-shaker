@@ -1,0 +1,246 @@
+import "std/data/vector";
+import "std/io/dir";
+import "std/io/file";
+import "std/os/cmd";
+import "std/os/os";
+import "std/os/filesystem";
+import "std/text/print";
+import "./util";
+import "./json";
+import "./semver";
+import "./manifest";
+import "./registry";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Resolving and installing packages into ./spice_packages
+// ---------------------------------------------------------------------------------------------------------------------
+
+public const string CODELOAD_URL = "https://codeload.github.com";
+
+public type Installer struct {
+    public Registry registry
+    public Lockfile lock
+    public Vector<String> handled   // Packages that were already processed in this run
+    public bool preferLocked = false // Keep the locked version when it still satisfies the constraint
+    public unsigned int changes = 0u
+}
+
+public f<String> packagePath(const String& name) {
+    return String(PACKAGES_DIR) + "/" + name;
+}
+
+public f<bool> isGithubRequirement(const String& constraint) {
+    return constraint.startsWith(GITHUB_PREFIX);
+}
+
+/**
+ * Split "github:owner/repo#ref" into its parts. The ref defaults to HEAD.
+ */
+public f<bool> parseGithubRequirement(const String& requirement, String& owner, String& repo, String& ref) {
+    if !isGithubRequirement(requirement) { return false; }
+    String rest = tail(requirement, cast<unsigned long>(getRawLength(GITHUB_PREFIX)));
+    ref = String("HEAD");
+    const long hash = rest.find('#');
+    if hash >= 0l {
+        ref = tail(rest, cast<unsigned long>(hash) + 1l);
+        rest = rest.getSubstring(0l, hash);
+    }
+    const Vector<String> parts = split(rest, '/');
+    if parts.getSize() != 2l { return false; }
+    owner = parts.get(0l);
+    repo = parts.get(1l);
+    return isValidGithubName(owner) && isValidGithubName(repo) && isValidGitRef(ref);
+}
+
+public p removeDirectory(const String& path) {
+    if !dirExists(path.getRaw()) { return; }
+    String command = String("rm -rf \"") + path + "\"";
+    if isWindows() { command = String("rmdir /s /q \"") + path + "\""; }
+    execCmd(command);
+}
+
+/**
+ * Download an archive and unpack it into packages/<name>, replacing a previous installation
+ */
+f<bool> Installer.fetchArchive(const String& name, const String& url) {
+    const String archive = String(getTempDir()) + "/spice-shaker-" + fmtLong(cast<long>(getPID())) + "-" + name + ".tar.gz";
+    if !downloadFile(url, archive) {
+        println(String("error: Could not download ") + url);
+        deleteFile(archive.getRaw());
+        return false;
+    }
+    const String target = packagePath(name);
+    removeDirectory(target);
+    if mkDirs(target.getRaw(), MODE_ALL_RWX) != 0 {
+        println(String("error: Could not create ") + target);
+        deleteFile(archive.getRaw());
+        return false;
+    }
+    // GitHub archives contain a single top-level folder, which is dropped
+    const String command = String("tar -xzf \"") + archive + "\" -C \"" + target + "\" --strip-components=1";
+    const bool extracted = execCmd(command) == 0;
+    deleteFile(archive.getRaw());
+    if !extracted {
+        println(String("error: Could not unpack the archive of ") + name);
+        removeDirectory(target);
+    }
+    return extracted;
+}
+
+f<bool> Installer.wasHandled(const String& name) {
+    for unsigned long i = 0l; i < this.handled.getSize(); i++ {
+        if this.handled.get(i) == name { return true; }
+    }
+    return false;
+}
+
+/**
+ * Make sure a package satisfying the requirement ("^1.2.0" or "github:owner/repo#ref") is installed, including the
+ * packages it depends on. Prints what it does and returns false on the first failure.
+ */
+public f<bool> Installer.require(const String& name, const String& constraint) {
+    if !isValidPackageName(name) && !isValidGithubName(name) {
+        println(String("error: '") + name + "' is not a valid package name");
+        return false;
+    }
+    if this.wasHandled(name) {
+        const LockEntry known = this.lock.get(name);
+        if !isGithubRequirement(constraint) && known.source == "registry" && !satisfies(parseSemver(known.version), constraint) {
+            println(String("warning: ") + name + "@" + known.version + " does not satisfy '" + constraint + "', which is required by another package");
+        }
+        return true;
+    }
+    this.handled.pushBack(name);
+    if isGithubRequirement(constraint) { return this.requireGithub(name, constraint); }
+    return this.requireRegistry(name, constraint);
+}
+
+f<bool> Installer.requireRegistry(const String& name, const String& constraint) {
+    if !isValidPackageName(name) {
+        println(String("error: '") + name + "' is not a valid package name");
+        return false;
+    }
+    JV doc;
+    const Reply reply = this.registry.getPackage(name, doc);
+    if !reply.ok() {
+        if reply.status == 404 { println(String("error: Package '") + name + "' was not found in the registry"); }
+        else { println(String("error: ") + reply.error); }
+        return false;
+    }
+
+    // Collect the versions and choose one
+    JV versions = doc.get("versions");
+    Vector<String> candidates;
+    for JV item = versions.first(); item.exists(); item = item.after() { candidates.pushBack(item.getStr("version")); }
+    long chosen = -1l;
+    const LockEntry locked = this.lock.get(name);
+    if this.preferLocked && locked.source == "registry" && satisfies(parseSemver(locked.version), constraint) {
+        for unsigned long i = 0l; i < candidates.getSize(); i++ {
+            if candidates.get(i) == locked.version { chosen = cast<long>(i); }
+        }
+    }
+    if chosen < 0l { chosen = pickBestVersion(candidates, constraint); }
+    if chosen < 0l {
+        String available;
+        for unsigned long i = 0l; i < candidates.getSize() && i < 8l; i++ {
+            if i > 0l { available += ", "; }
+            available += candidates.get(i);
+        }
+        String hint = String(" (it has no releases yet)");
+        if !available.isEmpty() { hint = String(" (available: ") + available + ")"; }
+        println(String("error: No version of '") + name + "' satisfies '" + constraint + "'" + hint);
+        return false;
+    }
+    const String version = candidates.get(cast<unsigned long>(chosen));
+    if !containsVersionChars(version) {
+        println(String("error: The registry sent an invalid version for '") + name + "'");
+        return false;
+    }
+    JV chosenDoc = versions.at(cast<unsigned long>(chosen));
+    LockEntry entry = LockEntry(name, version, String("registry"));
+    JV dependencies = chosenDoc.get("dependencies");
+    for JV dep = dependencies.first(); dep.exists(); dep = dep.after() { entry.dependencies.pushBack(dep.keyName()); }
+
+    const String installDir = packagePath(name);
+    const bool upToDate = locked.source == "registry" && locked.version == version && dirExists(installDir.getRaw());
+    if upToDate {
+        println(String("  = ") + name + "@" + version);
+    } else {
+        if !this.fetchArchive(name, this.registry.downloadUrl(name, version)) { return false; }
+        println(String("  + ") + name + "@" + version);
+        this.changes++;
+    }
+    this.lock.set(entry);
+
+    for JV dep = dependencies.first(); dep.exists(); dep = dep.after() {
+        if !this.require(dep.keyName(), dep.str()) { return false; }
+    }
+    return true;
+}
+
+f<bool> Installer.requireGithub(const String& name, const String& requirement) {
+    String owner;
+    String repo;
+    String ref;
+    if !parseGithubRequirement(requirement, owner, repo, ref) {
+        println(String("error: Invalid GitHub reference '") + requirement + "', expected github:owner/repo[#ref]");
+        return false;
+    }
+    const LockEntry locked = this.lock.get(name);
+    const String installDir = packagePath(name);
+    const bool upToDate = locked.source == "github" && locked.version == ref && dirExists(installDir.getRaw()) &&
+                          (this.preferLocked || ref != "HEAD");
+    if upToDate {
+        println(String("  = ") + name + "@" + ref);
+    } else {
+        if !this.fetchArchive(name, String(CODELOAD_URL) + "/" + owner + "/" + repo + "/tar.gz/" + ref) { return false; }
+        println(String("  + ") + name + "@" + ref + " (github:" + owner + "/" + repo + ")");
+        this.changes++;
+    }
+
+    // Repositories on GitHub bring their own manifest
+    LockEntry entry = LockEntry(name, ref, String("github"));
+    Manifest nested;
+    const String manifestPath = packagePath(name) + "/" + MANIFEST_FILE;
+    if nested.load(manifestPath.getRaw()) {
+        for unsigned long i = 0l; i < nested.dependencies.getSize(); i++ { entry.dependencies.pushBack(nested.dependencies.get(i).key); }
+    }
+    this.lock.set(entry);
+    for unsigned long i = 0l; i < entry.dependencies.getSize(); i++ {
+        if !this.require(nested.dependencies.get(i).key, nested.dependencies.get(i).value) { return false; }
+    }
+    return true;
+}
+
+/**
+ * Remove every installed package that is not reachable from the dependencies of the manifest anymore
+ */
+public p Installer.prune(const Manifest& manifest) {
+    Vector<String> reachable;
+    Vector<String> queue;
+    for unsigned long i = 0l; i < manifest.dependencies.getSize(); i++ { queue.pushBack(manifest.dependencies.get(i).key); }
+    for unsigned long i = 0l; i < manifest.devDependencies.getSize(); i++ { queue.pushBack(manifest.devDependencies.get(i).key); }
+    while queue.getSize() > 0l {
+        const String current = queue.back();
+        queue.popBack();
+        bool seen = false;
+        for unsigned long i = 0l; i < reachable.getSize(); i++ { if reachable.get(i) == current { seen = true; } }
+        if seen { continue; }
+        reachable.pushBack(current);
+        const LockEntry entry = this.lock.get(current);
+        for unsigned long i = 0l; i < entry.dependencies.getSize(); i++ { queue.pushBack(entry.dependencies.get(i)); }
+    }
+    Vector<String> orphans;
+    for unsigned long i = 0l; i < this.lock.entries.getSize(); i++ {
+        bool keep = false;
+        for unsigned long k = 0l; k < reachable.getSize(); k++ { if reachable.get(k) == this.lock.entries.get(i).name { keep = true; } }
+        if !keep { orphans.pushBack(this.lock.entries.get(i).name); }
+    }
+    for unsigned long i = 0l; i < orphans.getSize(); i++ {
+        const LockEntry entry = this.lock.get(orphans.get(i));
+        removeDirectory(packagePath(orphans.get(i)));
+        this.lock.drop(orphans.get(i));
+        println(String("  - ") + orphans.get(i) + "@" + entry.version);
+        this.changes++;
+    }
+}

@@ -16,6 +16,31 @@ This is the home repo of the Spice Shaker project. It is the official package ma
 
 If you like Spice Shaker, please consider a GitHub star! ⭐
 
+## Usage
+Spice Shaker talks to the [Spice Rack](https://github.com/spicelang/spice-rack) package registry (`https://rack.spicelang.com`; override with the
+`SPICE_RACK_URL` environment variable). It needs `curl` and `tar` on the path.
+
+```bash
+spice-shaker init                          # create spice.json
+spice-shaker install json-parser           # latest version, recorded as ^x.y.z in spice.json
+spice-shaker install test-kit --dev --version "~1.2.0"
+spice-shaker install --github owner/repo --version v1.0.0   # straight from GitHub (tag, branch or sha)
+spice-shaker sync                          # install everything from spice.json, honoring spice.lock.json
+spice-shaker update                        # newest versions the constraints allow
+spice-shaker uninstall json-parser         # also removes dependencies nobody needs anymore
+spice-shaker list | search <term> | info <package>
+```
+
+Packages (and their dependencies) are installed to `spice_packages/<name>/`, the resolved versions are written to `spice.lock.json`. Import their
+sources relative to your file, e.g. `import "spice_packages/json-parser/src/json";`. Version constraints follow the registry:
+`1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0, <2.0.0`, `*`.
+
+## Development
+```bash
+./build.sh                           # builds bin/spice-shaker
+spice test src/tests.spice           # unit tests
+```
+
 ## Documentation
 Please visit the documentation at [spicelang.com](https://www.spicelang.com).
 
