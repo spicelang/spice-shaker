@@ -188,6 +188,12 @@ f<bool> Installer.installRegistry(const Dependency& dep, Vector<Requirement>& qu
         return false;
     }
     const String version = candidates.get(cast<unsigned long>(chosen));
+    // A package in a subdirectory of a repository with several packages (the archive is the whole repository)
+    const String& subdir = details.info.path;
+    if !subdir.isEmpty() && !isValidPackageDir(subdir) {
+        println(String("error: The registry sent an invalid directory for '") + name + "': " + subdir);
+        return false;
+    }
 
     LockEntry entry;
     entry.name = name;
@@ -202,7 +208,7 @@ f<bool> Installer.installRegistry(const Dependency& dep, Vector<Requirement>& qu
     } else {
         String error;
         const String expected = sameVersion ? locked.checksum : String("");
-        if !fetchPackage(this.registry.downloadUrl(name, version), name, installDir, expected, entry.checksum, error) {
+        if !fetchPackage(this.registry.downloadUrl(name, version), name, subdir, installDir, expected, entry.checksum, error) {
             println(String("error: ") + error);
             return false;
         }
@@ -243,7 +249,7 @@ f<bool> Installer.installGithub(const Dependency& dep, Vector<Requirement>& queu
         String error;
         const String expected = sameCommit ? locked.checksum : String("");
         const String url = githubArchiveUrl(dep.github, entry.commit);
-        if !fetchPackage(url, name, installDir, expected, entry.checksum, error) {
+        if !fetchPackage(url, name, String(""), installDir, expected, entry.checksum, error) {
             println(String("error: ") + error);
             return false;
         }

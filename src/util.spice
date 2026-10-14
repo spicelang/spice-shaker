@@ -72,6 +72,24 @@ public f<bool> isValidGithubRepo(const String& ownerAndRepo) {
 }
 
 /**
+ * Directory of a package inside its repository, e.g. "packages/github": segments that are valid GitHub names, separated by '/'
+ */
+public f<bool> isValidPackageDir(const String& dir) {
+    const unsigned long len = dir.getLength();
+    if len == 0l || len > 255l { return false; }
+    String segment;
+    for unsigned long i = 0l; i <= len; i++ {
+        if i < len && dir[i] != '/' {
+            segment.append(dir[i]);
+            continue;
+        }
+        if !isValidGithubName(segment) { return false; }
+        segment = String("");
+    }
+    return true;
+}
+
+/**
  * A git ref (tag, branch or sha) that is safe to use in a URL
  */
 public f<bool> isValidGitRef(const String& ref) {
@@ -321,6 +339,14 @@ f<bool> testNameValidation() {
     assert isValidGitRef(String("feature/x-1.2"));
     assert !isValidGitRef(String("a;b"));
     assert !isValidGitRef(String("a/../b"));
+    assert isValidPackageDir(String("packages/github"));
+    assert isValidPackageDir(String("github"));
+    assert !isValidPackageDir(String(""));
+    assert !isValidPackageDir(String("/packages"));
+    assert !isValidPackageDir(String("packages/"));
+    assert !isValidPackageDir(String("a//b"));
+    assert !isValidPackageDir(String("a/../b"));
+    assert !isValidPackageDir(String("a b"));
     return true;
 }
 

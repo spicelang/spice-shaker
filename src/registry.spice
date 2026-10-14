@@ -42,6 +42,7 @@ public type PackageSummary struct {
     public String name
     public String description
     public String repository
+    public String path // Directory of the package in its repository and archives, empty for the root
     public String homepage
     public String license
     public String maintainer
@@ -89,6 +90,8 @@ f<bool> decodeSummary(JsonValue* object, PackageSummary& summary) {
     valid = valid && readString(object, "repository", summary.repository) && readString(object, "homepage", summary.homepage);
     valid = valid && readString(object, "license", summary.license) && readString(object, "maintainer", summary.maintainer);
     valid = valid && readString(object, "latestVersion", summary.latestVersion) && readLong(object, "downloads", summary.downloads);
+    // Registries before packages in subdirectories do not send a path
+    valid = valid && (!object.hasField("path") || readString(object, "path", summary.path));
     if !valid || !object.hasField("tags") { return false; }
     JsonValue* tags = object.getField("tags");
     if !tags.isArray() { return false; }
@@ -280,9 +283,19 @@ f<bool> testDecodeRegistryAnswers() {
     assert decodePackageDetails(doc, details);
     deleteJsonValue(doc);
     assert details.info.name == "a" && details.info.latestVersion.isEmpty() && details.info.downloads == 3l;
-    assert details.info.tags.getSize() == 1l && details.versions.getSize() == 1l;
+    assert details.info.tags.getSize() == 1l && details.versions.getSize() == 1l && details.info.path.isEmpty();
     PackageVersion& version = details.versions.get(0l);
     assert version.version == "1.0.0" && !version.prerelease && version.dependencies.get(String("b")) == "^1";
+
+    // A package in a subdirectory of its repository
+    Result<JsonValue*> nestedParsed = parseJson(String("{\"total\": 1, \"page\": 1, \"packages\": [{\"name\": \"github\", ") +
+                                                "\"description\": \"\", \"repository\": \"r\", \"path\": \"packages/github\", \"homepage\": \"\", " +
+                                                "\"license\": \"\", \"maintainer\": \"m\", \"tags\": [], \"latestVersion\": \"0.1.0\", \"downloads\": 0}]}");
+    JsonValue* nestedDoc = nestedParsed.unwrap();
+    SearchResult nested;
+    assert decodeSearchResult(nestedDoc, nested);
+    deleteJsonValue(nestedDoc);
+    assert nested.packages.getSize() == 1l && nested.packages.get(0l).path == "packages/github";
 
     // Unexpected kinds are rejected instead of panicking
     Result<JsonValue*> wrongKinds = parseJson(String("{\"total\": \"1\", \"page\": 1, \"packages\": {}}"));

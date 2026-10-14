@@ -2,6 +2,7 @@
 import "std/crypto/sha256";
 import "std/data/vector";
 import "std/io/dir";
+import "std/io/file";
 import "std/net/http" as http;
 import "std/net/http-client";
 import "std/os/cmd";
@@ -55,20 +56,27 @@ public f<String> tempArchivePath(const String& name) {
 }
 
 /**
- * Unpack a .tar.gz archive into an empty directory, dropping the single top-level folder that GitHub archives have
+ * Unpack a .tar.gz archive into an empty directory, dropping the single top-level folder that GitHub archives have.
+ * With a `subdir`, only that directory of the archive is unpacked, as the root of `target`. `topLevel` is the name of the
+ * top-level folder, as `listArchiveFiles` reports it.
  */
-public f<bool> unpackArchive(const String& archive, const String& target, String& error) {
+public f<bool> unpackArchive(const String& archive, const String& target, const String& subdir, const String& topLevel, String& error) {
     removeTree(target);
     if mkDirs(target.getRaw(), MODE_ALL_RWX) != 0 {
         error = String("Could not create ") + target;
         return false;
+    }
+    int stripComponents = 1;
+    for unsigned long i = 0l; i < subdir.getLength(); i++ {
+        if i == 0l || subdir[i] == '/' { stripComponents++; }
     }
     Vector<String> args;
     args.pushBack(String("-xzf"));
     args.pushBack(archive);
     args.pushBack(String("-C"));
     args.pushBack(target);
-    args.pushBack(String("--strip-components=1"));
+    args.pushBack(String("--strip-components=") + toString(stripComponents));
+    if !subdir.isEmpty() { args.pushBack(topLevel + "/" + subdir); }
     if !runTool("tar", args) {
         removeTree(target);
         error = String("Could not unpack ") + archive + ". Is 'tar' installed?";
@@ -78,10 +86,11 @@ public f<bool> unpackArchive(const String& archive, const String& target, String
 }
 
 /**
- * Paths of the regular files in an archive, relative to its top-level folder and sorted byte-wise.
- * Directories, links and paths with '..' are left out.
+ * Paths of the regular files in an archive, relative to its top-level folder (or to `subdir` in it, leaving out everything
+ * else) and sorted byte-wise. Directories, links and paths with '..' are left out. `topLevel` is set to the name of the
+ * top-level folder.
  */
-public f<bool> listArchiveFiles(const String& archive, Vector<String>& files, String& error) {
+public f<bool> listArchiveFiles(const String& archive, const String& subdir, Vector<String>& files, String& topLevel, String& error) {
     // The plain listing has the names, the verbose listing the entry types (first character of the mode), line by line
     Vector<String> args;
     args.pushBack(String("-tzf"));
@@ -101,13 +110,19 @@ public f<bool> listArchiveFiles(const String& archive, Vector<String>& files, St
         error = String("Could not list the files of ") + archive;
         return false;
     }
+    const String subdirPrefix = subdir.isEmpty() ? String("") : subdir + "/";
     for unsigned long i = 0l; i < nameLines.getSize(); i++ {
         const String& detail = detailLines.get(i);
         if detail.isEmpty() || detail[0l] != '-' { continue; }
         const String& name = nameLines.get(i);
         const long slash = name.find('/');
         if slash < 0l { continue; }
-        const String relative = name.getSubstring(cast<unsigned long>(slash) + 1l);
+        if topLevel.isEmpty() { topLevel = name.getSubstring(0l, slash); }
+        String relative = name.getSubstring(cast<unsigned long>(slash) + 1l);
+        if !subdirPrefix.isEmpty() {
+            if !relative.startsWith(subdirPrefix.getRaw()) { continue; }
+            relative = relative.getSubstring(subdirPrefix.getLength());
+        }
         if relative.isEmpty() || relative.startsWith("/") || relative.endsWith("/") { continue; }
         bool safe = true;
         const Vector<String> parts = split(relative, '/');
@@ -139,16 +154,22 @@ public f<bool> treeChecksum(const String& root, const Vector<String>& files, Str
 }
 
 /**
- * Download an archive, unpack it into `target` and compute its checksum. If `expectedChecksum` is not empty, the
+ * Download an archive, unpack it into `target` and compute its checksum. A package in a subdirectory of its repository
+ * (`subdir`, e.g. "packages/github") is only that directory of the archive. If `expectedChecksum` is not empty, the
  * checksum has to match it; otherwise the package is removed again.
  */
-public f<bool> fetchPackage(const String& url, const String& name, const String& target, const String& expectedChecksum,
-                            String& checksum, String& error) {
+public f<bool> fetchPackage(const String& url, const String& name, const String& subdir, const String& target,
+                            const String& expectedChecksum, String& checksum, String& error) {
     const String archive = tempArchivePath(name);
     bool ok = downloadFile(url, archive, error);
     Vector<String> files;
-    ok = ok && listArchiveFiles(archive, files, error);
-    ok = ok && unpackArchive(archive, target, error);
+    String topLevel;
+    ok = ok && listArchiveFiles(archive, subdir, files, topLevel, error);
+    if ok && !subdir.isEmpty() && files.isEmpty() {
+        error = String("The archive of ") + name + " has no directory " + subdir;
+        ok = false;
+    }
+    ok = ok && unpackArchive(archive, target, subdir, topLevel, error);
     removeFile(archive);
     ok = ok && treeChecksum(target, files, checksum, error);
     if ok && !expectedChecksum.isEmpty() && checksum != expectedChecksum {
@@ -178,15 +199,65 @@ f<bool> testTreeChecksum() {
     assert runTool("tar", args);
 
     Vector<String> files;
+    String topLevel;
     String error;
-    assert listArchiveFiles(base + "/pkg.tar.gz", files, error);
+    assert listArchiveFiles(base + "/pkg.tar.gz", String(""), files, topLevel, error);
+    assert topLevel == "pkg-1.0";
     assert files.getSize() == 2l;
     assert files.get(0l) == "README.md" && files.get(1l) == "src/main.spice";
-    assert unpackArchive(base + "/pkg.tar.gz", base + "/out", error);
+    assert unpackArchive(base + "/pkg.tar.gz", base + "/out", String(""), topLevel, error);
     String checksum;
     assert treeChecksum(base + "/out", files, checksum, error);
     const String expectedList = sha256(String("# pkg\r\n")) + "  README.md\n" + sha256(String("f<int> main() {}\n")) + "  src/main.spice\n";
     assert checksum == String(CHECKSUM_PREFIX) + sha256(expectedList);
+    removeTree(base);
+    return true;
+}
+
+#[test]
+f<bool> testPackageInSubdirectory() {
+    // A repository with two packages: only the requested directory is unpacked, as the package root
+    const String base = String(getTempDir()) + "/spice-shaker-test-subdir-" + toString(getPID());
+    removeTree(base);
+    const String gitDir = base + "/repo-abc/packages/github/src";
+    const String yamlDir = base + "/repo-abc/packages/yaml";
+    assert mkDirs(gitDir.getRaw(), MODE_ALL_RWX) == 0;
+    assert mkDirs(yamlDir.getRaw(), MODE_ALL_RWX) == 0;
+    assert writeBinaryFile(base + "/repo-abc/README.md", String("# all packages\n"));
+    assert writeBinaryFile(base + "/repo-abc/packages/github/spice.toml", String("[package]\nname = \"github\"\n"));
+    assert writeBinaryFile(base + "/repo-abc/packages/github/src/client.spice", String("// client\n"));
+    assert writeBinaryFile(base + "/repo-abc/packages/yaml/spice.toml", String("[package]\nname = \"yaml\"\n"));
+    Vector<String> args;
+    args.pushBack(String("-czf"));
+    args.pushBack(base + "/repo.tar.gz");
+    args.pushBack(String("-C"));
+    args.pushBack(base);
+    args.pushBack(String("repo-abc"));
+    assert runTool("tar", args);
+
+    Vector<String> files;
+    String topLevel;
+    String error;
+    assert listArchiveFiles(base + "/repo.tar.gz", String("packages/github"), files, topLevel, error);
+    assert topLevel == "repo-abc";
+    assert files.getSize() == 2l;
+    assert files.get(0l) == "spice.toml" && files.get(1l) == "src/client.spice";
+    assert unpackArchive(base + "/repo.tar.gz", base + "/out", String("packages/github"), topLevel, error);
+    const String manifestPath = base + "/out/spice.toml";
+    const String sourcePath = base + "/out/src/client.spice";
+    const String readmePath = base + "/out/README.md";
+    const String packagesPath = base + "/out/packages";
+    assert fileExists(manifestPath.getRaw()) && fileExists(sourcePath.getRaw());
+    assert !fileExists(readmePath.getRaw()) && !dirExists(packagesPath.getRaw());
+    String checksum;
+    assert treeChecksum(base + "/out", files, checksum, error);
+    const String expectedList = sha256(String("[package]\nname = \"github\"\n")) + "  spice.toml\n" + sha256(String("// client\n")) +
+                                "  src/client.spice\n";
+    assert checksum == String(CHECKSUM_PREFIX) + sha256(expectedList);
+
+    Vector<String> none;
+    assert listArchiveFiles(base + "/repo.tar.gz", String("packages/gith"), none, topLevel, error);
+    assert none.isEmpty();
     removeTree(base);
     return true;
 }
