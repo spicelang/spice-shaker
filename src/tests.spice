@@ -4,7 +4,6 @@ import "./semver";
 import "./manifest-layout";
 import "./manifest";
 import "./lockfile";
-import "./json";
 import "./registry";
 import "./archive";
 import "./installer";

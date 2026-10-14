@@ -6,12 +6,10 @@ import "std/io/file";
 import "std/io/filepath";
 import "std/os/filesystem";
 import "std/os/process";
-import "std/text/json/json-value";
 import "std/text/print";
 
 // Own imports
 import "./util";
-import "./json";
 import "./semver";
 import "./manifest";
 import "./lockfile";
@@ -159,21 +157,17 @@ f<bool> Installer.finishPackage(LockEntry& entry, DependencySource kind, bool ch
 
 f<bool> Installer.installRegistry(const Dependency& dep, Vector<Requirement>& queue) {
     const String& name = dep.name;
-    Reply reply = this.registry.getPackage(name);
+    PackageDetails details;
+    const Reply reply = this.registry.getPackage(name, details);
     if !reply.ok() {
         if reply.status == 404 { println(String("error: Package '") + name + "' was not found in the registry"); }
         else { println(String("error: ") + reply.error); }
-        reply.release();
         return false;
     }
 
     // Collect the versions and choose one
-    JsonValue* versions = jsonField(reply.doc, "versions");
     Vector<String> candidates;
-    for unsigned long i = 0l; i < jsonSize(versions) && versions.isArray(); i++ {
-        candidates.pushBack(jsonString(versions.getArrayItem(i), "version"));
-    }
-    reply.release();
+    for unsigned long i = 0l; i < details.versions.getSize(); i++ { candidates.pushBack(details.versions.get(i).version); }
     const LockEntry locked = this.previous.get(name);
     long chosen = -1l;
     if this.preferLocked && locked.source == "registry" && satisfies(parseSemver(locked.version), dep.version) {

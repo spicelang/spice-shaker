@@ -1,15 +1,14 @@
 // Std imports
+import "std/data/pair";
 import "std/data/vector";
 import "std/io/file";
 import "std/io/filepath";
 import "std/os/filesystem";
-import "std/text/json/json-value";
 import "std/text/print";
 import "std/type/type-conversion";
 
 // Own imports
 import "./util";
-import "./json";
 import "./semver";
 import "./manifest";
 import "./lockfile";
@@ -337,26 +336,22 @@ public f<int> runList() {
 
 public f<int> runSearch(const String& query, long page) {
     Registry registry;
-    Reply reply = registry.search(query, page);
+    SearchResult found;
+    const Reply reply = registry.search(query, page, found);
     if !reply.ok() {
         println(String("error: ") + reply.error);
-        reply.release();
         return EXIT_FAILED;
     }
-    JsonValue* packages = jsonField(reply.doc, "packages");
-    if jsonSize(packages) == 0l || !packages.isArray() {
+    if found.packages.isEmpty() {
         println(String("No packages found for '") + query + "'.");
-        reply.release();
         return EXIT_OK;
     }
-    for unsigned long i = 0l; i < packages.getArraySize(); i++ {
-        JsonValue* item = packages.getArrayItem(i);
-        String version = jsonString(item, "latestVersion");
-        if version.isEmpty() { version = String("-"); }
-        println(padRight(jsonString(item, "name"), 24l) + padRight(version, 10l) + shortened(jsonString(item, "description"), 60l));
+    for unsigned long i = 0l; i < found.packages.getSize(); i++ {
+        const PackageSummary& item = found.packages.get(i);
+        const String version = item.latestVersion.isEmpty() ? String("-") : item.latestVersion;
+        println(padRight(item.name, 24l) + padRight(version, 10l) + shortened(item.description, 60l));
     }
-    println(String("\n") + toString(jsonLong(reply.doc, "total")) + " package(s) in total, page " + toString(jsonLong(reply.doc, "page")));
-    reply.release();
+    println(String("\n") + toString(found.total) + " package(s) in total, page " + toString(found.page));
     return EXIT_OK;
 }
 
@@ -366,56 +361,47 @@ public f<int> runInfo(const String& name) {
         return EXIT_FAILED;
     }
     Registry registry;
-    Reply reply = registry.getPackage(name);
+    PackageDetails details;
+    const Reply reply = registry.getPackage(name, details);
     if !reply.ok() {
         if reply.status == 404 { println(String("error: Package '") + name + "' was not found in the registry"); }
         else { println(String("error: ") + reply.error); }
-        reply.release();
         return EXIT_FAILED;
     }
-    JsonValue* info = jsonField(reply.doc, "package");
-    String latest = jsonString(info, "latestVersion");
-    if latest.isEmpty() { latest = String("-"); }
-    println(jsonString(info, "name") + "@" + latest);
-    println(jsonString(info, "description"));
+    const PackageSummary& info = details.info;
+    println(info.name + "@" + (info.latestVersion.isEmpty() ? String("-") : info.latestVersion));
+    println(info.description);
     println("");
-    println(String("repository:  ") + jsonString(info, "repository"));
-    const String homepage = jsonString(info, "homepage");
-    if !homepage.isEmpty() { println(String("homepage:    ") + homepage); }
-    const String license = jsonString(info, "license");
-    if !license.isEmpty() { println(String("license:     ") + license); }
-    println(String("maintainer:  ") + jsonString(info, "maintainer"));
-    println(String("downloads:   ") + toString(jsonLong(info, "downloads")));
-    JsonValue* tags = jsonField(info, "tags");
+    println(String("repository:  ") + info.repository);
+    if !info.homepage.isEmpty() { println(String("homepage:    ") + info.homepage); }
+    if !info.license.isEmpty() { println(String("license:     ") + info.license); }
+    println(String("maintainer:  ") + info.maintainer);
+    println(String("downloads:   ") + toString(info.downloads));
     String tagLine;
-    for unsigned long i = 0l; i < jsonSize(tags) && tags.isArray(); i++ {
-        if !tagLine.isEmpty() { tagLine += ", "; }
-        tagLine += jsonText(tags.getArrayItem(i));
+    for unsigned long i = 0l; i < info.tags.getSize(); i++ {
+        if i > 0l { tagLine += ", "; }
+        tagLine += info.tags.get(i);
     }
     if !tagLine.isEmpty() { println(String("tags:        ") + tagLine); }
 
-    JsonValue* versions = jsonField(reply.doc, "versions");
-    const unsigned long versionCount = versions != nil<JsonValue*> && versions.isArray() ? versions.getArraySize() : 0l;
+    const unsigned long versionCount = details.versions.getSize();
     if versionCount == 0l {
         println("\nNo releases yet.");
-        reply.release();
         return EXIT_OK;
     }
     println("\nVersions:");
     for unsigned long i = 0l; i < versionCount && i < 10l; i++ {
-        JsonValue* version = versions.getArrayItem(i);
-        String line = String("  ") + padRight(jsonString(version, "version"), 14l) + head(jsonString(version, "publishedAt"), 10l);
-        if jsonBool(version, "prerelease") { line += "  (pre-release)"; }
+        PackageVersion& version = details.versions.get(i);
+        String line = String("  ") + padRight(version.version, 14l) + head(version.publishedAt, 10l);
+        if version.prerelease { line += "  (pre-release)"; }
         println(line);
-        JsonValue* deps = jsonField(version, "dependencies");
-        if i == 0l && deps != nil<JsonValue*> && deps.isObject() {
-            for unsigned long k = 0l; k < deps.getObjectSize(); k++ {
-                println(String("      requires ") + deps.getObjectKey(k) + " " + jsonText(deps.getObjectValue(k)));
-            }
+        if i > 0l { continue; }
+        // The requirements of the newest version
+        foreach Pair<const String&, String&> dependency : version.dependencies {
+            println(String("      requires ") + dependency.getFirst() + " " + dependency.getSecond());
         }
     }
     if versionCount > 10l { println(String("  ... and ") + toString(cast<long>(versionCount) - 10l) + " more"); }
-    reply.release();
     return EXIT_OK;
 }
 

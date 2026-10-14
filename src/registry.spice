@@ -1,12 +1,12 @@
 // Std imports
+import "std/data/map";
+import "std/data/vector";
 import "std/net/http";
 import "std/net/http-client";
 import "std/os/env";
 import "std/text/json/json-value";
+import "std/text/json/json-parser";
 import "std/type/type-conversion";
-
-// Own imports
-import "./json";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Clients for the JSON API of the Spice Rack package registry and the GitHub REST API
@@ -20,21 +20,128 @@ const string GITHUB_TOKEN_ENV = "GITHUB_TOKEN";
 const string CODELOAD_URL = "https://codeload.github.com";
 
 /**
- * Outcome of a request. `error` is empty on success. `doc` is the parsed JSON answer (or nil), owned by the caller.
+ * Outcome of a request. `error` is empty on success.
  */
 public type Reply struct {
     public int status = 0
     public String error
-    public JsonValue* doc = nil<JsonValue*>
 }
 
 public f<bool> Reply.ok() {
     return this.error.isEmpty();
 }
 
-public p Reply.release() {
-    if this.doc != nil<JsonValue*> { deleteJsonValue(this.doc); }
+public type PackageVersion struct {
+    public String version
+    public String publishedAt
+    public bool prerelease = false
+    public Map<String, String> dependencies // Name -> version constraint
 }
+
+public type PackageSummary struct {
+    public String name
+    public String description
+    public String repository
+    public String homepage
+    public String license
+    public String maintainer
+    public String latestVersion // Empty if the package has no releases
+    public long downloads = 0l
+    public Vector<String> tags
+}
+
+public type PackageDetails struct {
+    public PackageSummary info
+    public Vector<PackageVersion> versions // Newest first
+}
+
+public type SearchResult struct {
+    public Vector<PackageSummary> packages
+    public long total = 0l
+    public long page = 0l
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Decoding the answers of the registry. The std accessors panic on an unexpected kind, so every value is checked first;
+// an answer of another shape is reported as invalid.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[ignoreUnusedReturnValue]
+f<bool> readString(JsonValue* object, string key, String& target) {
+    if !object.hasField(key) { return false; }
+    JsonValue* value = object.getField(key);
+    if value.isNull() { return true; } // e.g. the latest version of a package without releases
+    if !value.isString() { return false; }
+    target = value.getString();
+    return true;
+}
+
+f<bool> readLong(JsonValue* object, string key, long& target) {
+    if !object.hasField(key) { return false; }
+    JsonValue* value = object.getField(key);
+    if !value.isNumber() { return false; }
+    target = value.hasUnsignedIntegerValue() ? cast<long>(value.getUnsignedInteger()) : cast<long>(value.getNumber());
+    return true;
+}
+
+f<bool> decodeSummary(JsonValue* object, PackageSummary& summary) {
+    bool valid = readString(object, "name", summary.name) && readString(object, "description", summary.description);
+    valid = valid && readString(object, "repository", summary.repository) && readString(object, "homepage", summary.homepage);
+    valid = valid && readString(object, "license", summary.license) && readString(object, "maintainer", summary.maintainer);
+    valid = valid && readString(object, "latestVersion", summary.latestVersion) && readLong(object, "downloads", summary.downloads);
+    if !valid || !object.hasField("tags") { return false; }
+    JsonValue* tags = object.getField("tags");
+    if !tags.isArray() { return false; }
+    for unsigned long i = 0l; i < tags.getArraySize(); i++ {
+        JsonValue* tag = tags.getArrayItem(i);
+        if !tag.isString() { return false; }
+        summary.tags.pushBack(tag.getString());
+    }
+    return true;
+}
+
+f<bool> decodeVersion(JsonValue* object, PackageVersion& version) {
+    bool valid = readString(object, "version", version.version) && readString(object, "publishedAt", version.publishedAt);
+    if !valid || !object.hasField("prerelease") || !object.hasField("dependencies") { return false; }
+    JsonValue* prerelease = object.getField("prerelease");
+    JsonValue* dependencies = object.getField("dependencies");
+    if !prerelease.isBool() || !dependencies.isObject() { return false; }
+    version.prerelease = prerelease.getBool();
+    for unsigned long i = 0l; i < dependencies.getObjectSize(); i++ {
+        JsonValue* constraint = dependencies.getObjectValue(i);
+        if !constraint.isString() { return false; }
+        version.dependencies.insert(dependencies.getObjectKey(i), constraint.getString());
+    }
+    return true;
+}
+
+f<bool> decodePackageDetails(JsonValue* doc, PackageDetails& details) {
+    if !doc.hasField("package") || !doc.hasField("versions") { return false; }
+    JsonValue* versions = doc.getField("versions");
+    if !decodeSummary(doc.getField("package"), details.info) || !versions.isArray() { return false; }
+    for unsigned long i = 0l; i < versions.getArraySize(); i++ {
+        PackageVersion version;
+        if !decodeVersion(versions.getArrayItem(i), version) { return false; }
+        details.versions.pushBack(version);
+    }
+    return true;
+}
+
+f<bool> decodeSearchResult(JsonValue* doc, SearchResult& searchResult) {
+    if !readLong(doc, "total", searchResult.total) || !readLong(doc, "page", searchResult.page) || !doc.hasField("packages") { return false; }
+    JsonValue* packages = doc.getField("packages");
+    if !packages.isArray() { return false; }
+    for unsigned long i = 0l; i < packages.getArraySize(); i++ {
+        PackageSummary summary;
+        if !decodeSummary(packages.getArrayItem(i), summary) { return false; }
+        searchResult.packages.pushBack(summary);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------------------------------------------------
 
 public type Registry struct {
     public String baseUrl
@@ -54,9 +161,9 @@ public p Registry.ctor() {
 }
 
 /**
- * GET a path of the registry and parse the JSON answer
+ * GET a path of the registry. On success, `doc` is the parsed answer, which the caller releases with deleteJsonValue.
  */
-public f<Reply> Registry.getJson(const String& path) {
+f<Reply> Registry.getJson(const String& path, JsonValue*& doc) {
     Reply reply;
     const String url = this.baseUrl + path;
     Result<HttpResponse> response = this.client.get(url.getRaw());
@@ -68,22 +175,41 @@ public f<Reply> Registry.getJson(const String& path) {
     }
     const HttpResponse& answer = response.unwrap();
     reply.status = cast<int>(answer.statusCode);
-    reply.doc = parseJsonOrNil(answer.body);
+    Result<JsonValue*> parsed = parseJson(answer.body);
     if answer.statusCode != STATUS_OK {
-        reply.error = jsonString(reply.doc, "error");
+        // Error answers look like {"error": "..."}
+        if parsed.isOk() {
+            JsonValue* errorDoc = parsed.unwrap();
+            readString(errorDoc, "error", reply.error);
+            deleteJsonValue(errorDoc);
+        }
         if reply.error.isEmpty() { reply.error = String("The registry answered with HTTP status ") + toString(reply.status); }
-    } else if reply.doc == nil<JsonValue*> {
-        reply.error = String("The registry sent an invalid answer");
+        return reply;
     }
+    if parsed.isErr() {
+        reply.error = String("The registry sent an invalid answer");
+        return reply;
+    }
+    doc = parsed.unwrap();
     return reply;
 }
 
-public f<Reply> Registry.getPackage(const String& name) {
-    return this.getJson(String("/api/v1/packages/") + urlEncode(name));
+public f<Reply> Registry.getPackage(const String& name, PackageDetails& details) {
+    JsonValue* doc = nil<JsonValue*>;
+    Reply reply = this.getJson(String("/api/v1/packages/") + urlEncode(name), doc);
+    if !reply.ok() { return reply; }
+    if !decodePackageDetails(doc, details) { reply.error = String("The registry sent an invalid answer"); }
+    deleteJsonValue(doc);
+    return reply;
 }
 
-public f<Reply> Registry.search(const String& query, long page) {
-    return this.getJson(String("/api/v1/packages?q=") + urlEncode(query) + "&page=" + toString(page));
+public f<Reply> Registry.search(const String& query, long page, SearchResult& searchResult) {
+    JsonValue* doc = nil<JsonValue*>;
+    Reply reply = this.getJson(String("/api/v1/packages?q=") + urlEncode(query) + "&page=" + toString(page), doc);
+    if !reply.ok() { return reply; }
+    if !decodeSearchResult(doc, searchResult) { reply.error = String("The registry sent an invalid answer"); }
+    deleteJsonValue(doc);
+    return reply;
 }
 
 /**
@@ -139,4 +265,35 @@ public f<bool> resolveGithubCommit(const String& repo, const String& ref, String
 
 public f<String> githubArchiveUrl(const String& repo, const String& commit) {
     return String(CODELOAD_URL) + "/" + repo + "/tar.gz/" + commit;
+}
+
+#[test]
+f<bool> testDecodeRegistryAnswers() {
+    const String packageJson = String("{\"package\": {\"name\": \"a\", \"description\": \"A\", \"repository\": \"r\", ") +
+                               "\"homepage\": \"\", \"license\": \"MIT\", \"maintainer\": \"m\", \"tags\": [\"x\"], " +
+                               "\"latestVersion\": null, \"downloads\": 3, \"stars\": 0}, \"versions\": [{\"version\": \"1.0.0\", " +
+                               "\"tag\": \"v1.0.0\", \"publishedAt\": \"2026-10-13\", \"prerelease\": false, \"downloads\": 1, " +
+                               "\"dependencies\": {\"b\": \"^1\"}}]}";
+    Result<JsonValue*> parsed = parseJson(packageJson);
+    JsonValue* doc = parsed.unwrap();
+    PackageDetails details;
+    assert decodePackageDetails(doc, details);
+    deleteJsonValue(doc);
+    assert details.info.name == "a" && details.info.latestVersion.isEmpty() && details.info.downloads == 3l;
+    assert details.info.tags.getSize() == 1l && details.versions.getSize() == 1l;
+    PackageVersion& version = details.versions.get(0l);
+    assert version.version == "1.0.0" && !version.prerelease && version.dependencies.get(String("b")) == "^1";
+
+    // Unexpected kinds are rejected instead of panicking
+    Result<JsonValue*> wrongKinds = parseJson(String("{\"total\": \"1\", \"page\": 1, \"packages\": {}}"));
+    JsonValue* wrongDoc = wrongKinds.unwrap();
+    SearchResult searchResult;
+    assert !decodeSearchResult(wrongDoc, searchResult);
+    deleteJsonValue(wrongDoc);
+    Result<JsonValue*> notAnObject = parseJson(String("[1]"));
+    JsonValue* arrayDoc = notAnObject.unwrap();
+    PackageDetails none;
+    assert !decodePackageDetails(arrayDoc, none);
+    deleteJsonValue(arrayDoc);
+    return true;
 }
