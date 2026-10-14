@@ -4,7 +4,7 @@
   <p align="center">Official Package Manager for the Spice programming language.</p>
   <p align="center">
     <a target="_blank" href="https://github.com/spicelang/spice-shaker/releases/latest"><img src="https://img.shields.io/github/v/release/spicelang/spice-shaker?include_prereleases"></a>
-    <a target="_blank" href="https://github.com/spicelang/spice-shaker/actions/workflows/ci-spice.yml"><img src="https://github.com/spicelang/spice-shaker/actions/workflows/ci-spice.yml/badge.svg"></a>
+    <a target="_blank" href="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml"><img src="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml/badge.svg"></a>
     <a target="_blank" href="https://makeapullrequest.com"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
     <a target="_blank" href="./LICENSE.md"><img src="https://img.shields.io/github/license/spicelang/spice-shaker"></a>
   </p>
