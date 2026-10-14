@@ -370,9 +370,10 @@ public f<int> runInfo(const String& name) {
     }
     const PackageSummary& info = details.info;
     println(info.name + "@" + (info.latestVersion.isEmpty() ? String("-") : info.latestVersion));
-    println(info.description);
+    if !info.description.isEmpty() { println(info.description); }
     println("");
     println(String("repository:  ") + info.repository);
+    if !info.path.isEmpty() { println(String("directory:   ") + info.path); }
     if !info.homepage.isEmpty() { println(String("homepage:    ") + info.homepage); }
     if !info.license.isEmpty() { println(String("license:     ") + info.license); }
     println(String("maintainer:  ") + info.maintainer);

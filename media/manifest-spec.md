@@ -221,7 +221,8 @@ L        = concatenation, over all regular files of the package sorted by their 
            hex(sha256(file contents)) + "  " + relative path + "\n"
 ```
 
-Relative paths use `/` as separator and are relative to the package root (the top-level directory of the archive is stripped).
+Relative paths use `/` as separator and are relative to the package root (the top-level directory of the archive is stripped; for
+a registry package in a subdirectory of its repository, the package root is that directory).
 Directories, symbolic links and other non-regular entries are not included. Hex digits are lowercase.
 
 Shaker computes the checksum every time it downloads a package. If the lock file has a checksum for the same source and version
@@ -246,7 +247,9 @@ installed.
 
 **Registry dependencies.** Shaker fetches the package's versions from the registry. It picks the highest version that satisfies the
 constraint, ignoring pre-releases unless no stable version matches. In `sync`, a locked version is kept as long as it satisfies the
-constraint. The archive is downloaded from the registry's download endpoint.
+constraint. The archive is downloaded from the registry's download endpoint. If the registry reports a `path` for the package (a
+repository with several packages, each in its own directory such as `packages/github`), only that directory of the archive is
+unpacked, as the root of `spice_packages/<name>`.
 
 **GitHub dependencies.** Shaker resolves `rev` (or `HEAD` for the default branch) to a commit sha with the GitHub REST API
 (`GET /repos/{owner}/{repo}/commits/{ref}`). If the `GITHUB_TOKEN` environment variable is set, it is sent as a bearer token. In `sync`,
@@ -338,6 +341,11 @@ The registry ([Spice Rack](https://github.com/spicelang/spice-rack)) reads the m
 reads `spice.toml` and uses only the registry dependencies of `[dependencies]` and
 `[dev-dependencies]`; GitHub and path dependencies are not registry dependencies and are not listed. Package metadata (description,
 license, ...) continues to come from the GitHub repository.
+
+A repository can hold several packages, each in a directory with its own `spice.toml`. The registry reads the manifest and README
+from that directory, takes the releases whose tag starts with the directory (full path or last segment) and `-`, `/` or `@`
+(`github-v1.0.0`, `github/v1.0.0`, `github@1.0.0`, `packages/github/v1.0.0`), takes the description from `[package]` of the
+manifest and reports the directory as `path` in its API.
 
 ## Out of scope
 
