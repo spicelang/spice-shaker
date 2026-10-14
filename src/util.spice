@@ -1,128 +1,50 @@
+// Std imports
 import "std/data/vector";
+import "std/io/dir";
+import "std/io/file";
+import "std/os/os";
+import "std/os/process";
+import "std/text/analysis";
+import "std/text/format";
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Small string helpers shared by all other modules
+// Small helpers shared by all other modules: name rules, string helpers the std does not have and file system operations
+// that need external programs
 // ---------------------------------------------------------------------------------------------------------------------
 
-public type KeyValue struct {
-    public String key
-    public String value
-}
-
-public p KeyValue.ctor() {}
-
-public p KeyValue.ctor(const KeyValue& original) {
-    this.key = original.key;
-    this.value = original.value;
-}
+public const unsigned long MAX_NAME_LENGTH = 64l;
 
 /**
- * Deep-copy assignment, so that entries survive being shifted around inside a vector
- */
-public p operator=(KeyValue& this, const KeyValue& original) {
-    if &this == &original { return; }
-    this.key = original.key;
-    this.value = original.value;
-}
-
-public p KeyValue.ctor(const String& key, const String& value) {
-    this.key = key;
-    this.value = value;
-}
-
-/**
- * Convert a signed integer to its decimal representation
- */
-public f<String> fmtLong(long value) {
-    if value == 0l { return String("0"); }
-    String digits;
-    bool negative = value < 0l;
-    // Work on the negative magnitude, so LONG_MIN does not overflow
-    long rest = negative ? value : -value;
-    while rest != 0l {
-        const long digit = -(rest % 10l);
-        digits.append(cast<char>(48 + cast<int>(digit)));
-        rest /= 10l;
-    }
-    if negative { digits.append('-'); }
-    digits.reverse();
-    return digits;
-}
-
-/**
- * Parse a decimal integer. Returns the fallback if the input is empty or not numeric.
- */
-public f<long> parseLong(const String& input, long fallback = 0l) {
-    const unsigned long len = input.getLength();
-    if len == 0l { return fallback; }
-    unsigned long i = 0l;
-    bool negative = false;
-    if input[0l] == '-' { negative = true; i = 1l; }
-    if i >= len || len - i > 18l { return fallback; }
-    long acc = 0l;
-    while i < len {
-        const char c = input[i];
-        if c < '0' || c > '9' { return fallback; }
-        acc = acc * 10l + cast<long>(cast<int>(c) - 48);
-        i++;
-    }
-    return negative ? -acc : acc;
-}
-
-/**
- * Split by a separator character. Empty parts are kept.
- */
-public f<Vector<String>> split(const String& input, char separator) {
-    Vector<String> parts;
-    String current;
-    const unsigned long len = input.getLength();
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = input[i];
-        if c == separator {
-            parts.pushBack(current);
-            current = String("");
-        } else {
-            current.append(c);
-        }
-    }
-    parts.pushBack(current);
-    return parts;
-}
-
-/**
- * Cut off the first characters and return the rest
- */
-public f<String> tail(const String& input, unsigned long from) {
-    if from >= input.getLength() { return String(""); }
-    return input.getSubstring(from);
-}
-
-public f<String> lower(const String& input) {
-    String acc;
-    for unsigned long i = 0l; i < input.getLength(); i++ {
-        char c = input[i];
-        if c >= 'A' && c <= 'Z' { c = cast<char>(cast<int>(c) + 32); }
-        acc.append(c);
-    }
-    return acc;
-}
-
-public f<bool> isLowerAlnum(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-}
-
-/**
- * Package names on the registry: lower-case letters, digits, '-' and '_', starting with a letter or digit.
- * Everything that ends up in a shell command or a path has to pass this check.
+ * Package and dependency names: lower-case letters, digits, '-' and '_', starting with a letter or digit.
+ * Everything that ends up in a path or a command line has to pass this check.
  */
 public f<bool> isValidPackageName(const String& name) {
     const unsigned long len = name.getLength();
-    if len == 0l || len > 64l || !isLowerAlnum(name[0l]) { return false; }
+    if len == 0l || len > MAX_NAME_LENGTH || !isLowerAlnum(name[0l]) { return false; }
     for unsigned long i = 1l; i < len; i++ {
         const char c = name[i];
         if !isLowerAlnum(c) && c != '-' && c != '_' { return false; }
     }
     return true;
+}
+
+public f<bool> isLowerAlnum(char c) {
+    return isLower(c) || isDigit(c);
+}
+
+/**
+ * Turn arbitrary text (a directory or repository name) into a valid package name
+ */
+public f<String> sanitizeName(const String& input) {
+    const String lowered = toLower(input);
+    String sanitized;
+    for unsigned long i = 0l; i < lowered.getLength() && i < MAX_NAME_LENGTH; i++ {
+        const char c = lowered[i];
+        sanitized.append(isLowerAlnum(c) || c == '-' || c == '_' ? c : '-');
+    }
+    // The first character has to be a letter or digit
+    while !sanitized.isEmpty() && !isLowerAlnum(sanitized[0l]) { sanitized = sanitized.getSubstring(1l); }
+    return sanitized;
 }
 
 /**
@@ -133,76 +55,104 @@ public f<bool> isValidGithubName(const String& name) {
     if len == 0l || len > 100l || name == "." || name == ".." { return false; }
     for unsigned long i = 0l; i < len; i++ {
         const char c = name[i];
-        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '_' && c != '.' { return false; }
+        if !isAlphaNum(c) && c != '-' && c != '_' && c != '.' { return false; }
     }
     return true;
 }
 
 /**
- * A git ref (tag, branch or sha) that is safe to use in a URL and a shell command
+ * "owner/repo" with two valid GitHub names
+ */
+public f<bool> isValidGithubRepo(const String& ownerAndRepo) {
+    const long slash = ownerAndRepo.find('/');
+    if slash < 0l { return false; }
+    const String owner = ownerAndRepo.getSubstring(0l, slash);
+    const String repo = ownerAndRepo.getSubstring(cast<unsigned long>(slash) + 1l);
+    return isValidGithubName(owner) && isValidGithubName(repo);
+}
+
+/**
+ * A git ref (tag, branch or sha) that is safe to use in a URL
  */
 public f<bool> isValidGitRef(const String& ref) {
     const unsigned long len = ref.getLength();
-    if len == 0l || len > 100l { return false; }
+    if len == 0l || len > 100l || ref.contains("..") { return false; }
     for unsigned long i = 0l; i < len; i++ {
         const char c = ref[i];
-        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '_' && c != '.' && c != '/' { return false; }
-    }
-    return true;
-}
-
-public f<bool> containsVersionChars(const String& version) {
-    const unsigned long len = version.getLength();
-    if len == 0l || len > 64l { return false; }
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = version[i];
-        const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-        if !letter && !(c >= '0' && c <= '9') && c != '-' && c != '.' && c != '+' { return false; }
+        if !isAlphaNum(c) && c != '-' && c != '_' && c != '.' && c != '/' { return false; }
     }
     return true;
 }
 
 /**
- * Percent-encode a query value (RFC 3986 unreserved characters stay as they are)
+ * Byte-wise lexicographic order
  */
-public f<String> encodeQuery(const String& input) {
-    const string hex = "0123456789ABCDEF";
-    String acc;
-    const unsigned long len = input.getLength();
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = input[i];
-        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                           c == '-' || c == '_' || c == '.' || c == '~';
-        if plain {
-            acc.append(c);
-        } else {
-            const int code = cast<int>(c) & 255;
-            acc.append('%');
-            acc.append(hex[code / 16]);
-            acc.append(hex[code % 16]);
+public f<bool> isStringBefore(const String& a, const String& b) {
+    const unsigned long n = a.getLength() < b.getLength() ? a.getLength() : b.getLength();
+    for unsigned long i = 0l; i < n; i++ {
+        const int ca = cast<int>(a[i]) & 255;
+        const int cb = cast<int>(b[i]) & 255;
+        if ca != cb { return ca < cb; }
+    }
+    return a.getLength() < b.getLength();
+}
+
+/**
+ * Insertion sort; the lists are short
+ */
+public p sortStrings(Vector<String>& list) {
+    Vector<String> sorted;
+    for unsigned long i = 0l; i < list.getSize(); i++ {
+        unsigned long pos = 0l;
+        while pos < sorted.getSize() && !isStringBefore(list.get(i), sorted.get(pos)) { pos++; }
+        sorted.insertAt(pos, list.get(i));
+    }
+    list = sorted;
+}
+
+public f<bool> containsString(const Vector<String>& list, const String& value) {
+    for unsigned long i = 0l; i < list.getSize(); i++ {
+        if list.get(i) == value { return true; }
+    }
+    return false;
+}
+
+/**
+ * Levenshtein distance, used to suggest the right key for a typo
+ */
+public f<unsigned long> editDistance(const String& a, const String& b) {
+    const unsigned long n = b.getLength();
+    Vector<unsigned long> row;
+    for unsigned long j = 0l; j <= n; j++ { row.pushBack(j); }
+    for unsigned long i = 1l; i <= a.getLength(); i++ {
+        unsigned long diagonal = row.get(0l);
+        row[0l] = i;
+        for unsigned long j = 1l; j <= n; j++ {
+            const unsigned long above = row.get(j);
+            unsigned long best = diagonal + (a[i - 1l] == b[j - 1l] ? 0l : 1l);
+            if above + 1l < best { best = above + 1l; }
+            if row.get(j - 1l) + 1l < best { best = row.get(j - 1l) + 1l; }
+            row[j] = best;
+            diagonal = above;
         }
     }
-    return acc;
-}
-
-public f<String> head(const String& input, unsigned long count) {
-    if count >= input.getLength() { return input; }
-    return input.getSubstring(0l, cast<long>(count));
+    return row.get(n);
 }
 
 /**
- * A version constraint consists of digits, letters (for pre-releases and wildcards) and the operator characters
+ * The candidate closest to the input, if it is at most two edits away. Empty otherwise.
  */
-public f<bool> containsConstraintChars(const String& text) {
-    if text.isEmpty() { return false; }
-    for unsigned long i = 0l; i < text.getLength(); i++ {
-        const char c = text[i];
-        const bool word = isLowerAlnum(c) || (c >= 'A' && c <= 'Z');
-        if !word && c != '*' && c != '^' && c != '~' && c != '.' && c != ',' && c != ' ' && c != '>' && c != '<' && c != '=' && c != '-' && c != '+' { return false; }
+public f<String> closestMatch(const String& input, const Vector<String>& candidates) {
+    String best;
+    unsigned long bestDistance = 3l;
+    for unsigned long i = 0l; i < candidates.getSize(); i++ {
+        const unsigned long distance = editDistance(input, candidates.get(i));
+        if distance < bestDistance {
+            bestDistance = distance;
+            best = candidates.get(i);
+        }
     }
-    return true;
+    return best;
 }
 
 public f<String> padRight(const String& input, unsigned long width) {
@@ -216,34 +166,183 @@ public f<String> shortened(const String& input, unsigned long maxLength) {
     return input.getSubstring(0l, cast<long>(maxLength) - 3l) + "...";
 }
 
-#[test]
-f<bool> testNumbers() {
-    assert fmtLong(0l) == "0";
-    assert fmtLong(-1204l) == "-1204";
-    assert parseLong(String("42")) == 42l;
-    assert parseLong(String("x"), -1l) == -1l;
-    return true;
+public f<String> head(const String& input, unsigned long count) {
+    if count >= input.getLength() { return input; }
+    return input.getSubstring(0l, cast<long>(count));
+}
+
+/**
+ * Lines of a text without their line breaks. A trailing line break does not produce an empty last line.
+ */
+public f<Vector<String>> splitLines(const String& text) {
+    Vector<String> lines;
+    String current;
+    for unsigned long i = 0l; i < text.getLength(); i++ {
+        const char c = text[i];
+        if c == '\n' {
+            lines.pushBack(current);
+            current = String("");
+        } else if c != '\r' {
+            current.append(c);
+        }
+    }
+    if !current.isEmpty() { lines.pushBack(current); }
+    return lines;
+}
+
+public f<String> joinLines(const Vector<String>& lines) {
+    String text;
+    for unsigned long i = 0l; i < lines.getSize(); i++ {
+        text += lines.get(i);
+        text += "\n";
+    }
+    return text;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// File system operations the std has no function for. They run the platform's tools without a shell.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Run a program and report whether it succeeded
+ */
+#[ignoreUnusedReturnValue]
+public f<bool> runTool(string program, const Vector<String>& args) {
+    Result<int> exitCode = runProcess(String(program), args);
+    return exitCode.isOk() && exitCode.unwrap() == 0;
+}
+
+/**
+ * Path with the separators of the platform. cmd.exe would read a forward slash as the start of a switch.
+ */
+public f<String> nativePath(const String& path) {
+    String native = path;
+    if isWindows() { native.replaceAll('/', '\\'); }
+    return native;
+}
+
+/**
+ * Remove a directory with everything in it. A symbolic link (or junction) is removed without touching its target.
+ */
+public p removeTree(const String& path, bool isLink = false) {
+    if !dirExists(path.getRaw()) && !fileExists(path.getRaw()) && !isLink { return; }
+    Vector<String> args;
+    if isWindows() {
+        args.pushBack(String("/c"));
+        args.pushBack(String("rmdir"));
+        if !isLink {
+            args.pushBack(String("/s"));
+            args.pushBack(String("/q"));
+        }
+        args.pushBack(nativePath(path));
+        runTool("cmd", args);
+    } else {
+        args.pushBack(String(isLink ? "-f" : "-rf"));
+        args.pushBack(path);
+        runTool("rm", args);
+    }
+}
+
+/**
+ * Create a symbolic link (a directory junction on Windows) at `link` that points to the absolute path `target`
+ */
+public f<bool> createDirLink(const String& target, const String& link) {
+    Vector<String> args;
+    if isWindows() {
+        args.pushBack(String("/c"));
+        args.pushBack(String("mklink"));
+        args.pushBack(String("/J"));
+        args.pushBack(nativePath(link));
+        args.pushBack(nativePath(target));
+        return runTool("cmd", args);
+    }
+    args.pushBack(String("-s"));
+    args.pushBack(target);
+    args.pushBack(link);
+    return runTool("ln", args);
+}
+
+/**
+ * Read a file without any line break translation, so that binary files arrive unchanged
+ */
+public f<Result<String>> readBinaryFile(const String& path) {
+    File file = openFile(path.getRaw(), "rb")!;
+    String content;
+    while true {
+        const char c = file.readChar();
+        if file.isEOF() { break; }
+        content += c;
+    }
+    if !file.close() { return err<String>("Could not close the file"); }
+    return ok(content);
+}
+
+/**
+ * Delete a file if it exists. Failing to do so is not an error for the callers, so the result may be ignored.
+ */
+#[ignoreUnusedReturnValue]
+public f<bool> removeFile(const String& path) {
+    return deleteFile(path.getRaw());
+}
+
+/**
+ * Write bytes to a file without any line break translation
+ */
+public f<bool> writeBinaryFile(const String& path, const String& content) {
+    Result<File> opened = openFile(path.getRaw(), "wb");
+    if opened.isErr() { return false; }
+    File& file = opened.unwrap();
+    bool written = true;
+    for unsigned long i = 0l; i < content.getLength() && written; i++ { written = file.write(content[i]); }
+    return file.close() && written;
+}
+
+/**
+ * Write a text file. Line breaks are written as they are on every platform.
+ */
+public f<bool> writeTextFile(const String& path, const String& content) {
+    return writeBinaryFile(path, content);
 }
 
 #[test]
 f<bool> testNameValidation() {
     assert isValidPackageName(String("json-parser_2"));
     assert !isValidPackageName(String("Json"));
+    assert !isValidPackageName(String("-json"));
     assert !isValidPackageName(String("a b"));
     assert !isValidPackageName(String("$(rm)"));
+    assert sanitizeName(String("My.Repo Name")) == "my-repo-name";
+    assert sanitizeName(String("--x")) == "x";
     assert isValidGithubName(String("spice.lang"));
     assert !isValidGithubName(String(".."));
+    assert isValidGithubRepo(String("owner/Repo.x"));
+    assert !isValidGithubRepo(String("owner"));
+    assert !isValidGithubRepo(String("a/b/c"));
     assert isValidGitRef(String("feature/x-1.2"));
     assert !isValidGitRef(String("a;b"));
+    assert !isValidGitRef(String("a/../b"));
     return true;
 }
 
 #[test]
-f<bool> testSplitAndEncode() {
-    const Vector<String> parts = split(String("a/b//c"), '/');
-    assert parts.getSize() == 4l;
-    assert parts.get(2l) == "";
-    assert encodeQuery(String("a b&c")) == "a%20b%26c";
+f<bool> testStringHelpers() {
+    assert editDistance(String("verison"), String("version")) == 2l;
+    assert editDistance(String(""), String("abc")) == 3l;
+    Vector<String> keys;
+    keys.pushBack(String("version"));
+    keys.pushBack(String("github"));
+    assert closestMatch(String("verison"), keys) == "version";
+    const String noMatch = closestMatch(String("completely-different"), keys);
+    assert noMatch.isEmpty();
+    Vector<String> list;
+    list.pushBack(String("b"));
+    list.pushBack(String("a_"));
+    list.pushBack(String("a"));
+    sortStrings(list);
+    assert list.get(0l) == "a" && list.get(1l) == "a_" && list.get(2l) == "b";
+    const Vector<String> lines = splitLines(String("a\r\n\nb\n"));
+    assert lines.getSize() == 3l && lines.get(1l) == "" && lines.get(2l) == "b";
+    assert joinLines(lines) == "a\n\nb\n";
     assert shortened(String("abcdefghij"), 8l) == "abcde...";
     return true;
 }

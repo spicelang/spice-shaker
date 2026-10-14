@@ -2,12 +2,12 @@
 set -eu
 
 # Prepare
-if [ ! -d bin ]; then
-    mkdir -p bin
+if [ ! -d build ]; then
+    mkdir -p build
 fi
 
 # Build
 (
-  cd ./bin || exit
+  cd ./build || exit
   spice build -m release -o ./spice-shaker ../src/main.spice
 )

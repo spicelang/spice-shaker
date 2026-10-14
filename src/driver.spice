@@ -1,16 +1,16 @@
+// Std imports
 import "std/io/cli-parser";
 import "std/io/cli-subcommand";
-import "std/io/cli-option";
+
+// Own imports
 import "./commands";
 
-public const string SHAKER_VERSION = "v0.1.0";
+public const string SHAKER_VERSION = "v0.2.0";
 
 public type CliOptions struct {
+    InstallRequest install
     String dependencyName
-    String versionConstraint
     String query
-    bool github = false
-    bool dev = false
 }
 
 public p CliOptions.ctor() {}
@@ -28,36 +28,39 @@ public p Driver.ctor() {
     this.parser.setFooter("Copyright (c) Marc Auberer 2021-2026");
 
     // Init subcommand
-    CliSubcommand& init = this.parser.addSubcommand("init", "Create a spice.json in the current directory");
+    CliSubcommand& init = this.parser.addSubcommand("init", "Create a spice.toml in the current directory");
     init.setCallback(p() {
         self.exitCode = runInit();
     });
 
     // Install subcommand
-    CliSubcommand& install = this.parser.addSubcommand("install", "Install a dependency and add it to spice.json");
-    this.addDependencyNameOption(install);
-    install.addOption("--version", this.options.versionConstraint, "Version constraint (e.g. ^1.2.0), or a git ref with --github");
-    install.addFlag("--github", this.options.github, "Install a dependency from GitHub (<dependency-name> is owner/repo)");
-    install.addFlag("--dev", this.options.dev, "Add the dependency to devDependencies");
+    CliSubcommand& install = this.parser.addSubcommand("install", "Install a dependency and add it to spice.toml");
+    install.addOption("package", this.options.install.target, "Package name, owner/repo with --github, or a directory with --path");
+    install.addOption("--version", this.options.install.version, "Version constraint of a registry package (e.g. ^1.2.0)");
+    install.addOption("--rev", this.options.install.rev, "Tag, branch or commit of a GitHub repository");
+    install.addOption("--as", this.options.install.name, "Dependency name for a GitHub or path dependency");
+    install.addFlag("--github", this.options.install.github, "Install from a GitHub repository");
+    install.addFlag("--path", this.options.install.path, "Install from a local directory");
+    install.addFlag("--dev", this.options.install.dev, "Add the dependency to [dev-dependencies]");
     install.setCallback(p() {
-        self.exitCode = runInstall(self.options.dependencyName, self.options.versionConstraint, self.options.github, self.options.dev);
+        self.exitCode = runInstall(self.options.install);
     });
 
     // Uninstall subcommand
-    CliSubcommand& uninstall = this.parser.addSubcommand("uninstall", "Uninstall a dependency and remove it from spice.json");
+    CliSubcommand& uninstall = this.parser.addSubcommand("uninstall", "Uninstall a dependency and remove it from spice.toml");
     this.addDependencyNameOption(uninstall);
     uninstall.setCallback(p() {
         self.exitCode = runUninstall(self.options.dependencyName);
     });
 
     // Sync subcommand
-    CliSubcommand& syncCmd = this.parser.addSubcommand("sync", "Install all dependencies of spice.json (honors spice.lock.json)");
+    CliSubcommand& syncCmd = this.parser.addSubcommand("sync", "Install all dependencies of spice.toml (honors spice.lock)");
     syncCmd.setCallback(p() {
         self.exitCode = runSync();
     });
 
     // Update subcommand
-    CliSubcommand& update = this.parser.addSubcommand("update", "Update all dependencies to the newest versions allowed by spice.json");
+    CliSubcommand& update = this.parser.addSubcommand("update", "Update all dependencies to the newest versions allowed by spice.toml");
     update.setCallback(p() {
         self.exitCode = runUpdate();
     });
@@ -84,7 +87,7 @@ public p Driver.ctor() {
 }
 
 public p Driver.addDependencyNameOption(CliSubcommand& subcommand) {
-    subcommand.addOption("dependency-name", this.options.dependencyName, "Dependency name");
+    subcommand.addOption("package", this.options.dependencyName, "Package name");
 }
 
 public f<int> Driver.parse(int argc, string[] argv) {

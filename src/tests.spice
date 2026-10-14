@@ -1,8 +1,12 @@
+// Own imports
 import "./util";
 import "./semver";
-import "./json";
+import "./manifest-layout";
 import "./manifest";
+import "./lockfile";
+import "./json";
 import "./registry";
+import "./archive";
 import "./installer";
 import "./commands";
 import "./driver";

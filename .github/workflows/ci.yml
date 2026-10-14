@@ -16,5 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Install toolchain (clang, lld)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
+
       - name: Setup Spice
         uses: spicelang/spice-setup-action@v1
+
+      - name: Run unit tests
+        run: spice test src/tests.spice
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Smoke test
+        run: ./build/spice-shaker --help

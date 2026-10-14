@@ -1,12 +1,18 @@
+// Std imports
 import "std/data/vector";
-import "std/io/filepath";
 import "std/io/file";
+import "std/io/filepath";
 import "std/os/filesystem";
+import "std/text/json/json-value";
 import "std/text/print";
+import "std/type/type-conversion";
+
+// Own imports
 import "./util";
 import "./json";
 import "./semver";
 import "./manifest";
+import "./lockfile";
 import "./registry";
 import "./installer";
 
@@ -17,22 +23,85 @@ import "./installer";
 const int EXIT_OK = 0;
 const int EXIT_FAILED = 1;
 
+/**
+ * What `install` was asked to add
+ */
+public type InstallRequest struct {
+    public String target     // Package name, owner/repo or path
+    public String version    // --version
+    public String rev        // --rev
+    public String name       // --as
+    public bool github = false
+    public bool path = false
+    public bool dev = false
+}
+
+p printErrors(const Vector<String>& errors) {
+    for unsigned long i = 0l; i < errors.getSize(); i++ { println(String("error: ") + errors.get(i)); }
+}
+
 f<bool> loadProject(Manifest& manifest) {
-    if manifest.load() { return true; }
-    if fileExists(MANIFEST_FILE) { println(String("error: ") + MANIFEST_FILE + " is not valid JSON"); }
-    else { println(String("error: No ") + MANIFEST_FILE + " found in the current directory. Run 'spice-shaker init' first."); }
+    if !fileExists(MANIFEST_FILE) {
+        println(String("error: No ") + MANIFEST_FILE + " found in the current directory. Run 'spice-shaker init' first.");
+        return false;
+    }
+    Vector<String> errors;
+    if loadManifest(String(MANIFEST_FILE), String(MANIFEST_FILE), manifest, errors) { return true; }
+    printErrors(errors);
     return false;
 }
 
 /**
- * Persist the lock file and prune packages that are not needed anymore
+ * Remove packages that are not needed anymore and write the lock file. This also runs after a failure, so that packages
+ * installed by the failed run do not stay behind.
  */
 f<int> finish(Installer& installer, const Manifest& manifest, bool ok, bool reportUpToDate = false) {
-    if ok { installer.prune(manifest); }
-    if !installer.lock.save() { println(String("error: Could not write ") + LOCK_FILE); return EXIT_FAILED; }
+    installer.prune(manifest);
+    if !installer.lock.save() {
+        println(String("error: Could not write ") + LOCK_FILE);
+        return EXIT_FAILED;
+    }
     if !ok { return EXIT_FAILED; }
     if reportUpToDate && installer.changes == 0u { println("Everything is up to date."); }
     return EXIT_OK;
+}
+
+const string GITIGNORE_FILE = ".gitignore";
+
+/**
+ * Content of a .gitignore that excludes the packages directory. Returns the content unchanged if it does so already.
+ */
+f<String> ignorePackagesDir(const String& content) {
+    const Vector<String> lines = splitLines(content);
+    for unsigned long i = 0l; i < lines.getSize(); i++ {
+        const String& line = lines.get(i);
+        String pattern = line.trim();
+        if pattern.startsWith("/") { pattern = pattern.getSubstring(1l); }
+        if pattern.endsWith("/") { pattern = pattern.getSubstring(0l, cast<long>(pattern.getLength()) - 1l); }
+        if pattern == PACKAGES_DIR { return content; }
+    }
+    // Keep the line breaks of the file
+    const string lineBreak = content.contains("\r\n") ? "\r\n" : "\n";
+    String updated = content;
+    if !updated.isEmpty() && !updated.endsWith("\n") { updated += lineBreak; }
+    return updated + "/" + PACKAGES_DIR + "/" + lineBreak;
+}
+
+/**
+ * Make sure that git ignores the packages directory, creating the .gitignore if there is none
+ */
+f<bool> ensurePackagesDirIgnored() {
+    String content;
+    if fileExists(GITIGNORE_FILE) {
+        Result<String> existing = readBinaryFile(String(GITIGNORE_FILE));
+        if existing.isErr() { return false; }
+        content = existing.unwrap();
+    }
+    const String updated = ignorePackagesDir(content);
+    if updated == content { return true; }
+    if !writeTextFile(String(GITIGNORE_FILE), updated) { return false; }
+    println(String(content.isEmpty() ? "Created " : "Updated ") + GITIGNORE_FILE + " to exclude " + PACKAGES_DIR + "/.");
+    return true;
 }
 
 public f<int> runInit() {
@@ -40,179 +109,254 @@ public f<int> runInit() {
         println(String("error: ") + MANIFEST_FILE + " exists already");
         return EXIT_FAILED;
     }
-    Manifest manifest;
     const FilePath cwd = FilePath(getCurrentWorkingDir());
-    const String dirName = cwd.getFileName();
-    const String name = lower(dirName);
-    String sanitized;
-    for unsigned long i = 0l; i < name.getLength(); i++ {
-        const char c = name[i];
-        sanitized.append(isLowerAlnum(c) || c == '-' || c == '_' ? c : '-');
-    }
-    manifest.name = sanitized.isEmpty() ? String("my-package") : sanitized;
-    if !manifest.save() {
+    Manifest manifest;
+    manifest.name = sanitizeName(cwd.getFileName());
+    if manifest.name.isEmpty() { manifest.name = String("my-package"); }
+    manifest.version = String("0.1.0");
+    if !writeTextFile(String(MANIFEST_FILE), renderManifest(manifest)) {
         println(String("error: Could not write ") + MANIFEST_FILE);
         return EXIT_FAILED;
     }
     println(String("Created ") + MANIFEST_FILE + " for '" + manifest.name + "'.");
-    println(String("Add '") + PACKAGES_DIR + "/' to your .gitignore and commit " + MANIFEST_FILE + " and " + LOCK_FILE + ".");
+    if !ensurePackagesDirIgnored() {
+        println(String("warning: Could not update ") + GITIGNORE_FILE + ". Add '/" + PACKAGES_DIR + "/' to it yourself.");
+    }
+    println(String("Commit ") + MANIFEST_FILE + " and " + LOCK_FILE + ", but not " + PACKAGES_DIR + "/.");
     return EXIT_OK;
 }
 
-public f<int> runInstall(const String& name, const String& versionOption, bool github, bool dev) {
+/**
+ * Turn the arguments of `install` into the dependency to add. The version of a registry dependency is decided after
+ * resolving, if it was not given.
+ */
+f<bool> buildDependency(const InstallRequest& request, Dependency& dep) {
+    if request.github && request.path {
+        println("error: --github and --path cannot be combined");
+        return false;
+    }
+    if !request.rev.isEmpty() && !request.github {
+        println("error: --rev is only allowed with --github");
+        return false;
+    }
+    if !request.version.isEmpty() && (request.github || request.path) {
+        println(String("error: --version is only allowed for registry packages") + (request.github ? ", use --rev" : ""));
+        return false;
+    }
+    if !request.name.isEmpty() && !request.github && !request.path {
+        println("error: --as is only allowed with --github or --path");
+        return false;
+    }
+    String name = request.name;
+    if request.github {
+        if !isValidGithubRepo(request.target) {
+            println(String("error: Expected owner/repo for --github, got '") + request.target + "'");
+            return false;
+        }
+        if !request.rev.isEmpty() && !isValidGitRef(request.rev) {
+            println(String("error: '") + request.rev + "' is not a valid git ref");
+            return false;
+        }
+        if name.isEmpty() {
+            const long slash = request.target.find('/');
+            name = sanitizeName(request.target.getSubstring(cast<unsigned long>(slash) + 1l));
+        }
+        dep = githubDependency(name, request.target, request.rev);
+    } else if request.path {
+        String path = request.target;
+        path.replaceAll('\\', '/');
+        while path.getLength() > 1l && path.endsWith("/") { path = path.getSubstring(0l, cast<long>(path.getLength()) - 1l); }
+        if name.isEmpty() {
+            Manifest target;
+            Vector<String> errors;
+            const String manifestPath = path + "/" + MANIFEST_FILE;
+            if !fileExists(manifestPath.getRaw()) {
+                println(String("error: ") + path + " has no " + MANIFEST_FILE);
+                return false;
+            }
+            if !loadManifest(manifestPath, manifestPath, target, errors) {
+                printErrors(errors);
+                return false;
+            }
+            name = target.name;
+        }
+        dep = pathDependency(name, path);
+    } else {
+        name = request.target;
+        if !request.version.isEmpty() && !isValidConstraint(request.version) {
+            println(String("error: '") + request.version + "' is not a valid version constraint");
+            return false;
+        }
+        dep = registryDependency(name, request.version.isEmpty() ? String("*") : request.version);
+    }
+    if !isValidPackageName(name) {
+        println(String("error: '") + name + "' is not a valid package name" + (request.name.isEmpty() && (request.github || request.path) ? ", choose one with --as" : ""));
+        return false;
+    }
+    dep.dev = request.dev;
+    return true;
+}
+
+public f<int> runInstall(const InstallRequest& request) {
+    Manifest manifest;
+    if !loadProject(manifest) { return EXIT_FAILED; }
+    Dependency dep;
+    if !buildDependency(request, dep) { return EXIT_FAILED; }
+    Installer installer;
+    if !installer.loadLock() { return EXIT_FAILED; }
+
+    // Resolve with the new dependency in a copy of the manifest, which is only saved if that works
+    Manifest planned = manifest;
+    Vector<String> errors;
+    if !planned.setDependency(dep, errors) { printErrors(errors); return EXIT_FAILED; }
+    println(String("Installing ") + dep.name + " ...");
+    if !installer.resolve(planned) { return finish(installer, manifest, false); }
+
+    if dep.source == DependencySource::REGISTRY && request.version.isEmpty() {
+        // Record a compatible range of the version that was picked
+        const LockEntry entry = installer.lock.get(dep.name);
+        const Semver picked = parseSemver(entry.version);
+        dep.version = picked.valid && picked.pre.isEmpty() ? String("^") + picked.toString() : entry.version;
+        if !planned.setDependency(dep, errors) { printErrors(errors); return finish(installer, manifest, false); }
+    }
+    if !planned.save() {
+        println(String("error: Could not write ") + MANIFEST_FILE);
+        return finish(installer, manifest, false);
+    }
+    println(String("Added ") + dep.name + " (" + dep.describe() + ") to [" + (dep.dev ? "dev-dependencies" : "dependencies") + "].");
+    const String entry = installer.entries.contains(dep.name) ? installer.entries.get(dep.name) : String(DEFAULT_ENTRY);
+    const String entryPath = packagePath(dep.name) + "/" + entry;
+    if fileExists(entryPath.getRaw()) {
+        // Imports are written without the file extension
+        const String importPath = entryPath.getSubstring(0l, cast<long>(entryPath.getLength()) - 6l);
+        println(String("Import it with: import \"") + importPath + "\";");
+    } else {
+        println(String("Import its files with: import \"") + packagePath(dep.name) + "/<file>\";");
+    }
+    return finish(installer, planned, true);
+}
+
+f<int> installAll(bool preferLocked) {
     Manifest manifest;
     if !loadProject(manifest) { return EXIT_FAILED; }
     Installer installer;
-    installer.lock.load();
-
-    String packageName = name;
-    String requirement = versionOption.isEmpty() ? String("*") : versionOption;
-    if github {
-        const Vector<String> parts = split(name, '/');
-        if parts.getSize() != 2l || !isValidGithubName(parts.get(0l)) || !isValidGithubName(parts.get(1l)) {
-            println(String("error: Expected owner/repo for --github, got '") + name + "'");
-            return EXIT_FAILED;
-        }
-        packageName = parts.get(1l);
-        requirement = String(GITHUB_PREFIX) + name;
-        if !versionOption.isEmpty() { requirement += "#" + versionOption; }
-    } else if !isValidPackageName(name) {
-        println(String("error: '") + name + "' is not a valid package name");
-        return EXIT_FAILED;
-    } else if !versionOption.isEmpty() && !containsConstraintChars(versionOption) {
-        println(String("error: '") + versionOption + "' is not a valid version constraint");
-        return EXIT_FAILED;
-    }
-
-    println(String("Installing ") + name + " ...");
-    const bool ok = installer.require(packageName, requirement);
-    if ok {
-        String recorded = requirement;
-        if !github && versionOption.isEmpty() {
-            // Record a compatible range of the version that was picked
-            const LockEntry entry = installer.lock.get(packageName);
-            const Semver picked = parseSemver(entry.version);
-            recorded = picked.valid && picked.pre.isEmpty() ? String("^") + picked.toString() : entry.version;
-        }
-        manifest.setDependency(packageName, recorded, dev);
-        if !manifest.save() { println(String("error: Could not write ") + MANIFEST_FILE); return EXIT_FAILED; }
-        const LockEntry installed = installer.lock.get(packageName);
-        println(String("Added ") + packageName + "@" + installed.version + " to " + (dev ? "devDependencies" : "dependencies") + ".");
-        println(String("Import it with: import \"") + PACKAGES_DIR + "/" + packageName + "/<file>\";");
-    }
-    return finish(installer, manifest, ok);
+    if !installer.loadLock() { return EXIT_FAILED; }
+    installer.preferLocked = preferLocked;
+    const bool ok = installer.resolve(manifest);
+    return finish(installer, manifest, ok, true);
 }
 
 /**
  * Install what the manifest asks for, preferring the versions of the lock file
  */
 public f<int> runSync() {
-    Manifest manifest;
-    if !loadProject(manifest) { return EXIT_FAILED; }
-    if manifest.dependencies.getSize() + manifest.devDependencies.getSize() == 0l {
-        println("Nothing to install: the manifest has no dependencies.");
-        return EXIT_OK;
-    }
-    Installer installer;
-    installer.lock.load();
-    installer.preferLocked = true;
-    return installAll(installer, manifest);
+    return installAll(true);
 }
 
 /**
- * Re-resolve all dependencies to the newest versions their constraints allow
+ * Re-resolve all dependencies to the newest versions and commits their specifications allow
  */
 public f<int> runUpdate() {
-    Manifest manifest;
-    if !loadProject(manifest) { return EXIT_FAILED; }
-    Installer installer;
-    installer.lock.load();
-    installer.preferLocked = false;
-    return installAll(installer, manifest);
-}
-
-f<int> installAll(Installer& installer, const Manifest& manifest) {
-    bool ok = true;
-    for unsigned long i = 0l; i < manifest.dependencies.getSize() && ok; i++ {
-        ok = installer.require(manifest.dependencies.get(i).key, manifest.dependencies.get(i).value);
-    }
-    for unsigned long i = 0l; i < manifest.devDependencies.getSize() && ok; i++ {
-        ok = installer.require(manifest.devDependencies.get(i).key, manifest.devDependencies.get(i).value);
-    }
-    return finish(installer, manifest, ok, true);
+    return installAll(false);
 }
 
 public f<int> runUninstall(const String& name) {
     Manifest manifest;
     if !loadProject(manifest) { return EXIT_FAILED; }
     Installer installer;
-    installer.lock.load();
-    if !manifest.removeDependency(name) {
+    if !installer.loadLock() { return EXIT_FAILED; }
+    if manifest.indexOf(name) < 0l {
         if installer.lock.contains(name) {
             println(String("error: '") + name + "' is not a direct dependency, another package needs it");
         } else {
-            println(String("error: '") + name + "' is not installed");
+            println(String("error: '") + name + "' is not a dependency");
         }
         return EXIT_FAILED;
     }
-    if !manifest.save() { println(String("error: Could not write ") + MANIFEST_FILE); return EXIT_FAILED; }
+    Vector<String> errors;
+    if !manifest.removeDependency(name, errors) { printErrors(errors); return EXIT_FAILED; }
+    if !manifest.save() {
+        println(String("error: Could not write ") + MANIFEST_FILE);
+        return EXIT_FAILED;
+    }
     println(String("Removed ") + name + " from " + MANIFEST_FILE + ".");
-    return finish(installer, manifest, true);
+    const int exitCode = finish(installer, manifest, true);
+    if installer.lock.contains(name) { println(String("note: ") + name + " stays installed, because other packages need it."); }
+    return exitCode;
 }
 
-p printTree(const Lockfile& lock, const String& name, const String& constraint, const String& indent, unsigned int depth) {
+p printTree(const Lockfile& lock, const String& name, const String& spec, const String& indent, Vector<String>& path) {
     const LockEntry entry = lock.get(name);
     String line = indent + name;
-    if lock.contains(name) { line += "@" + entry.version; } else { line += " (not installed)"; }
-    if !constraint.isEmpty() { line += "  [" + constraint + "]"; }
-    if entry.source == "github" { line += "  (github)"; }
-    println(line);
-    if depth >= 8u { return; }
-    for unsigned long i = 0l; i < entry.dependencies.getSize(); i++ {
-        printTree(lock, entry.dependencies.get(i), String(""), indent + "  ", depth + 1u);
+    if !lock.contains(name) {
+        line += " (not installed)";
+    } else if entry.isPath() {
+        line += String(" -> ") + entry.display();
+    } else {
+        line += String("@") + entry.display();
+        if !spec.isEmpty() { line += String("  [") + spec + "]"; }
     }
+    if containsString(path, name) {
+        println(line + "  (cycle)");
+        return;
+    }
+    println(line);
+    path.pushBack(name);
+    for unsigned long i = 0l; i < entry.dependencies.getSize(); i++ {
+        printTree(lock, entry.dependencies.get(i), String(""), indent + "  ", path);
+    }
+    path.popBack();
 }
 
 public f<int> runList() {
     Manifest manifest;
     if !loadProject(manifest) { return EXIT_FAILED; }
     Lockfile lock;
-    lock.load();
-    const String title = manifest.name.isEmpty() ? String("(unnamed)") : manifest.name;
-    println(title + "@" + manifest.version);
-    if manifest.dependencies.getSize() + manifest.devDependencies.getSize() == 0l {
+    String error;
+    if !lock.load(error) {
+        println(String("error: ") + error);
+        return EXIT_FAILED;
+    }
+    println(manifest.name + "@" + manifest.version);
+    if !manifest.hasDependencies() {
         println("  no dependencies");
         return EXIT_OK;
     }
+    bool devHeaderPrinted = false;
     for unsigned long i = 0l; i < manifest.dependencies.getSize(); i++ {
-        printTree(lock, manifest.dependencies.get(i).key, manifest.dependencies.get(i).value, String("  "), 0u);
-    }
-    if manifest.devDependencies.getSize() > 0l {
-        println("  dev:");
-        for unsigned long i = 0l; i < manifest.devDependencies.getSize(); i++ {
-            printTree(lock, manifest.devDependencies.get(i).key, manifest.devDependencies.get(i).value, String("    "), 0u);
+        const Dependency& dep = manifest.dependencies.get(i);
+        if dep.dev && !devHeaderPrinted {
+            println("  dev:");
+            devHeaderPrinted = true;
         }
+        Vector<String> path;
+        printTree(lock, dep.name, dep.describe(), String(dep.dev ? "    " : "  "), path);
     }
     return EXIT_OK;
 }
 
 public f<int> runSearch(const String& query, long page) {
     Registry registry;
-    JV doc;
-    const Reply reply = registry.search(query, page, doc);
-    if !reply.ok() { println(String("error: ") + reply.error); return EXIT_FAILED; }
-    JV packages = doc.get("packages");
-    if packages.size() == 0l {
+    Reply reply = registry.search(query, page);
+    if !reply.ok() {
+        println(String("error: ") + reply.error);
+        reply.release();
+        return EXIT_FAILED;
+    }
+    JsonValue* packages = jsonField(reply.doc, "packages");
+    if jsonSize(packages) == 0l || !packages.isArray() {
         println(String("No packages found for '") + query + "'.");
+        reply.release();
         return EXIT_OK;
     }
-    for JV item = packages.first(); item.exists(); item = item.after() {
-        String version = item.getStr("latestVersion");
+    for unsigned long i = 0l; i < packages.getArraySize(); i++ {
+        JsonValue* item = packages.getArrayItem(i);
+        String version = jsonString(item, "latestVersion");
         if version.isEmpty() { version = String("-"); }
-        println(padRight(item.getStr("name"), 24l) + padRight(version, 10l) + shortened(item.getStr("description"), 60l));
+        println(padRight(jsonString(item, "name"), 24l) + padRight(version, 10l) + shortened(jsonString(item, "description"), 60l));
     }
-    const long total = doc.getNum("total");
-    println(String("\n") + fmtLong(total) + " package(s) in total, page " + fmtLong(doc.getNum("page")));
+    println(String("\n") + toString(jsonLong(reply.doc, "total")) + " package(s) in total, page " + toString(jsonLong(reply.doc, "page")));
+    reply.release();
     return EXIT_OK;
 }
 
@@ -222,50 +366,67 @@ public f<int> runInfo(const String& name) {
         return EXIT_FAILED;
     }
     Registry registry;
-    JV doc;
-    const Reply reply = registry.getPackage(name, doc);
+    Reply reply = registry.getPackage(name);
     if !reply.ok() {
         if reply.status == 404 { println(String("error: Package '") + name + "' was not found in the registry"); }
         else { println(String("error: ") + reply.error); }
+        reply.release();
         return EXIT_FAILED;
     }
-    JV info = doc.get("package");
-    String latest = info.getStr("latestVersion");
+    JsonValue* info = jsonField(reply.doc, "package");
+    String latest = jsonString(info, "latestVersion");
     if latest.isEmpty() { latest = String("-"); }
-    println(info.getStr("name") + "@" + latest);
-    println(info.getStr("description"));
+    println(jsonString(info, "name") + "@" + latest);
+    println(jsonString(info, "description"));
     println("");
-    println(String("repository:  ") + info.getStr("repository"));
-    const String homepage = info.getStr("homepage");
+    println(String("repository:  ") + jsonString(info, "repository"));
+    const String homepage = jsonString(info, "homepage");
     if !homepage.isEmpty() { println(String("homepage:    ") + homepage); }
-    const String license = info.getStr("license");
+    const String license = jsonString(info, "license");
     if !license.isEmpty() { println(String("license:     ") + license); }
-    println(String("maintainer:  ") + info.getStr("maintainer"));
-    println(String("downloads:   ") + fmtLong(info.getNum("downloads")));
-    JV tags = info.get("tags");
+    println(String("maintainer:  ") + jsonString(info, "maintainer"));
+    println(String("downloads:   ") + toString(jsonLong(info, "downloads")));
+    JsonValue* tags = jsonField(info, "tags");
     String tagLine;
-    for JV tag = tags.first(); tag.exists(); tag = tag.after() {
+    for unsigned long i = 0l; i < jsonSize(tags) && tags.isArray(); i++ {
         if !tagLine.isEmpty() { tagLine += ", "; }
-        tagLine += tag.str();
+        tagLine += jsonText(tags.getArrayItem(i));
     }
     if !tagLine.isEmpty() { println(String("tags:        ") + tagLine); }
 
-    JV versions = doc.get("versions");
-    if versions.size() == 0l { println("\nNo releases yet."); return EXIT_OK; }
+    JsonValue* versions = jsonField(reply.doc, "versions");
+    const unsigned long versionCount = versions != nil<JsonValue*> && versions.isArray() ? versions.getArraySize() : 0l;
+    if versionCount == 0l {
+        println("\nNo releases yet.");
+        reply.release();
+        return EXIT_OK;
+    }
     println("\nVersions:");
-    long shown = 0l;
-    for JV version = versions.first(); version.exists() && shown < 10l; version = version.after() {
-        String line = String("  ") + padRight(version.getStr("version"), 14l) + head(version.getStr("publishedAt"), 10l);
-        if version.getBool("prerelease") { line += "  (pre-release)"; }
+    for unsigned long i = 0l; i < versionCount && i < 10l; i++ {
+        JsonValue* version = versions.getArrayItem(i);
+        String line = String("  ") + padRight(jsonString(version, "version"), 14l) + head(jsonString(version, "publishedAt"), 10l);
+        if jsonBool(version, "prerelease") { line += "  (pre-release)"; }
         println(line);
-        JV deps = version.get("dependencies");
-        if shown == 0l {
-            for JV dep = deps.first(); dep.exists(); dep = dep.after() {
-                println(String("      requires ") + dep.keyName() + " " + dep.str());
+        JsonValue* deps = jsonField(version, "dependencies");
+        if i == 0l && deps != nil<JsonValue*> && deps.isObject() {
+            for unsigned long k = 0l; k < deps.getObjectSize(); k++ {
+                println(String("      requires ") + deps.getObjectKey(k) + " " + jsonText(deps.getObjectValue(k)));
             }
         }
-        shown++;
     }
-    if versions.size() > shown { println(String("  ... and ") + fmtLong(cast<long>(versions.size()) - shown) + " more"); }
+    if versionCount > 10l { println(String("  ... and ") + toString(cast<long>(versionCount) - 10l) + " more"); }
+    reply.release();
     return EXIT_OK;
+}
+
+#[test]
+f<bool> testIgnorePackagesDir() {
+    assert ignorePackagesDir(String("")) == "/spice_packages/\n";
+    assert ignorePackagesDir(String("/build")) == "/build\n/spice_packages/\n";
+    assert ignorePackagesDir(String("a\r\nb\r\n")) == "a\r\nb\r\n/spice_packages/\r\n";
+    const String alreadyIgnored = String("# deps\nspice_packages\n");
+    assert ignorePackagesDir(alreadyIgnored) == alreadyIgnored;
+    const String anchored = String("/spice_packages/\n");
+    assert ignorePackagesDir(anchored) == anchored;
+    return true;
 }

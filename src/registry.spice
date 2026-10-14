@@ -1,33 +1,44 @@
+// Std imports
 import "std/net/http";
 import "std/net/http-client";
 import "std/os/env";
-import "std/os/cmd";
-import "./util";
+import "std/text/json/json-value";
+import "std/type/type-conversion";
+
+// Own imports
 import "./json";
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Client for the JSON API of the Spice Rack package registry
+// Clients for the JSON API of the Spice Rack package registry and the GitHub REST API
 // ---------------------------------------------------------------------------------------------------------------------
 
 public const string DEFAULT_REGISTRY_URL = "https://rack.spicelang.com";
 public const string REGISTRY_URL_ENV = "SPICE_RACK_URL";
+public const string USER_AGENT = "spice-shaker";
+const string GITHUB_API_URL = "https://api.github.com";
+const string GITHUB_TOKEN_ENV = "GITHUB_TOKEN";
+const string CODELOAD_URL = "https://codeload.github.com";
 
 /**
- * Outcome of a request to the registry. `error` is empty on success.
+ * Outcome of a request. `error` is empty on success. `doc` is the parsed JSON answer (or nil), owned by the caller.
  */
 public type Reply struct {
     public int status = 0
-    public String body
     public String error
+    public JsonValue* doc = nil<JsonValue*>
 }
 
 public f<bool> Reply.ok() {
     return this.error.isEmpty();
 }
 
+public p Reply.release() {
+    if this.doc != nil<JsonValue*> { deleteJsonValue(this.doc); }
+}
+
 public type Registry struct {
     public String baseUrl
-    public HttpClient client
+    HttpClient client
 }
 
 public p Registry.ctor() {
@@ -38,54 +49,94 @@ public p Registry.ctor() {
         while url.endsWith("/") { url = url.getSubstring(0l, cast<long>(url.getLength()) - 1l); }
         if !url.isEmpty() { this.baseUrl = url; }
     }
-    this.client.setDefaultHeader("Accept", "application/json");
-    this.client.setDefaultHeader("User-Agent", "spice-shaker");
+    this.client.setDefaultHeader(HEADER_ACCEPT, CONTENT_TYPE_JSON);
+    this.client.setDefaultHeader(HEADER_USER_AGENT, USER_AGENT);
 }
 
 /**
- * GET a path of the registry and parse the JSON answer into `doc`
+ * GET a path of the registry and parse the JSON answer
  */
-public f<Reply> Registry.getJson(const String& path, JV& doc) {
+public f<Reply> Registry.getJson(const String& path) {
     Reply reply;
     const String url = this.baseUrl + path;
     Result<HttpResponse> response = this.client.get(url.getRaw());
     if response.isErr() {
-        reply.error = String("Could not reach the registry at ") + this.baseUrl + " (" + response.getErr().message +
-                      "). Set " + REGISTRY_URL_ENV + " to use another registry.";
+        const Error& error = response.getErr();
+        reply.error = String("Could not reach the registry at ") + this.baseUrl + " (" + error.getMessage() + "). Set " +
+                      REGISTRY_URL_ENV + " to use another registry.";
         return reply;
     }
-    HttpResponse& answer = response.unwrap();
+    const HttpResponse& answer = response.unwrap();
     reply.status = cast<int>(answer.statusCode);
-    reply.body = answer.body;
-    doc = parseDoc(answer.body);
+    reply.doc = parseJsonOrNil(answer.body);
     if answer.statusCode != STATUS_OK {
-        String message = doc.getStr("error");
-        if message.isEmpty() { message = String("HTTP status ") + fmtLong(cast<long>(answer.statusCode)); }
-        reply.error = message;
-    } else if !doc.exists() {
+        reply.error = jsonString(reply.doc, "error");
+        if reply.error.isEmpty() { reply.error = String("The registry answered with HTTP status ") + toString(reply.status); }
+    } else if reply.doc == nil<JsonValue*> {
         reply.error = String("The registry sent an invalid answer");
     }
     return reply;
 }
 
-public f<Reply> Registry.getPackage(const String& name, JV& doc) {
-    return this.getJson(String("/api/v1/packages/") + encodeQuery(name), doc);
+public f<Reply> Registry.getPackage(const String& name) {
+    return this.getJson(String("/api/v1/packages/") + urlEncode(name));
 }
 
-public f<Reply> Registry.search(const String& query, long page, JV& doc) {
-    return this.getJson(String("/api/v1/packages?q=") + encodeQuery(query) + "&page=" + fmtLong(page), doc);
-}
-
-public f<String> Registry.downloadUrl(const String& name, const String& version) {
-    return this.baseUrl + "/api/v1/packages/" + encodeQuery(name) + "/versions/" + encodeQuery(version) + "/download";
+public f<Reply> Registry.search(const String& query, long page) {
+    return this.getJson(String("/api/v1/packages?q=") + urlEncode(query) + "&page=" + toString(page));
 }
 
 /**
- * Download a file to disk. The std http client keeps bodies in strings, which cannot hold binary data like archives,
- * so this delegates to curl (which ships with Linux, macOS and Windows 10+) and follows the registry's redirect
- * to the GitHub archive.
+ * URL of the archive of a package version. The registry counts the download and redirects to the archive on GitHub.
  */
-public f<bool> downloadFile(const String& url, const String& destination) {
-    const String command = String("curl -fsSL -o \"") + destination + "\" \"" + url + "\"";
-    return execCmd(command) == 0;
+public f<String> Registry.downloadUrl(const String& name, const String& version) {
+    return this.baseUrl + "/api/v1/packages/" + urlEncode(name) + "/versions/" + urlEncode(version) + "/download";
+}
+
+/**
+ * Resolve a git ref (branch, tag, sha or HEAD) of a GitHub repository to the full sha of its commit
+ */
+public f<bool> resolveGithubCommit(const String& repo, const String& ref, String& commit, String& error) {
+    HttpClient client;
+    client.setDefaultHeader(HEADER_ACCEPT, "application/vnd.github.sha");
+    client.setDefaultHeader(HEADER_USER_AGENT, USER_AGENT);
+    client.setDefaultHeader("X-GitHub-Api-Version", "2022-11-28");
+    Result<string> token = getEnv(GITHUB_TOKEN_ENV);
+    if token.isOk() {
+        const String bearer = String("Bearer ") + token.unwrap();
+        client.setDefaultHeader(HEADER_AUTHORIZATION, bearer.getRaw());
+    }
+    // Repository names and refs are validated to contain only URL-safe characters
+    const String url = String(GITHUB_API_URL) + "/repos/" + repo + "/commits/" + ref;
+    Result<HttpResponse> response = client.get(url.getRaw());
+    if response.isErr() {
+        const Error& requestError = response.getErr();
+        error = String("Could not reach GitHub (") + requestError.getMessage() + ")";
+        return false;
+    }
+    const HttpResponse& answer = response.unwrap();
+    if answer.statusCode == STATUS_NOT_FOUND || answer.statusCode == 422s {
+        error = String("GitHub repository ") + repo + " has no ref '" + ref + "'";
+        return false;
+    }
+    if answer.statusCode == STATUS_FORBIDDEN || answer.statusCode == STATUS_TOO_MANY_REQUESTS {
+        error = String("GitHub refused the request, probably because of its rate limit. Set ") + GITHUB_TOKEN_ENV +
+                " to a GitHub token to raise the limit.";
+        return false;
+    }
+    commit = answer.body.trim();
+    bool valid = answer.statusCode == STATUS_OK && commit.getLength() == 40l;
+    for unsigned long i = 0l; i < commit.getLength() && valid; i++ {
+        const char c = commit[i];
+        valid = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }
+    if !valid {
+        error = String("GitHub sent an unexpected answer for ") + repo + "@" + ref + " (HTTP status " +
+                toString(cast<int>(answer.statusCode)) + ")";
+    }
+    return valid;
+}
+
+public f<String> githubArchiveUrl(const String& repo, const String& commit) {
+    return String(CODELOAD_URL) + "/" + repo + "/tar.gz/" + commit;
 }

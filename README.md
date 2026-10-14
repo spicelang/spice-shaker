@@ -18,26 +18,46 @@ If you like Spice Shaker, please consider a GitHub star! ⭐
 
 ## Usage
 Spice Shaker talks to the [Spice Rack](https://github.com/spicelang/spice-rack) package registry (`https://rack.spicelang.com`; override with the
-`SPICE_RACK_URL` environment variable). It needs `curl` and `tar` on the path.
+`SPICE_RACK_URL` environment variable) and to GitHub (set `GITHUB_TOKEN` to raise the API rate limit). It needs `tar` on the path.
 
 ```bash
-spice-shaker init                          # create spice.json
-spice-shaker install json-parser           # latest version, recorded as ^x.y.z in spice.json
+spice-shaker init                          # create spice.toml and ignore spice_packages/ in .gitignore
+spice-shaker install json-parser           # latest version, recorded as ^x.y.z in spice.toml
 spice-shaker install test-kit --dev --version "~1.2.0"
-spice-shaker install --github owner/repo --version v1.0.0   # straight from GitHub (tag, branch or sha)
-spice-shaker sync                          # install everything from spice.json, honoring spice.lock.json
-spice-shaker update                        # newest versions the constraints allow
+spice-shaker install owner/repo --github --rev v1.0.0   # straight from GitHub (tag, branch or sha)
+spice-shaker install ../my-lib --path      # link a local package
+spice-shaker sync                          # install everything from spice.toml, honoring spice.lock
+spice-shaker update                        # newest versions and commits the manifest allows
 spice-shaker uninstall json-parser         # also removes dependencies nobody needs anymore
 spice-shaker list | search <term> | info <package>
 ```
 
-Packages (and their dependencies) are installed to `spice_packages/<name>/`, the resolved versions are written to `spice.lock.json`. Import their
-sources relative to your file, e.g. `import "spice_packages/json-parser/src/json";`. Version constraints follow the registry:
-`1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0, <2.0.0`, `*`.
+A manifest looks like this:
+
+```toml
+[package]
+name = "my-app"
+version = "0.1.0"
+spice = ">=0.29.0"          # optional: required compiler version
+entry = "src/lib.spice"     # optional: the file other packages import (default: src/main.spice)
+
+[dependencies]
+json-parser = "^1.2.0"
+http-utils = { github = "owner/http-utils", rev = "v1.0.0" }
+my-lib = { path = "../my-lib" }
+
+[dev-dependencies]
+test-kit = "~1.2.0"
+```
+
+Packages (and their dependencies) are installed to `spice_packages/<name>/`; the resolved versions, commits and content checksums are
+written to `spice.lock`. Import their sources relative to your file, e.g. `import "spice_packages/json-parser/src/main";`. Version
+constraints follow the registry: `1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0, <2.0.0`, `*`. The full format is specified in
+[media/manifest-spec.md](./media/manifest-spec.md).
 
 ## Development
 ```bash
-./build.sh                           # builds bin/spice-shaker
+./build.sh                           # builds build/spice-shaker
 spice test src/tests.spice           # unit tests
 ```
 

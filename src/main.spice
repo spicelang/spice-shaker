@@ -1,6 +1,7 @@
+// Own imports
 import "driver";
 
 f<int> main(int argc, string[] argv) {
-    Driver driver;
-    return driver.parse(argc, argv);
+    Driver cli;
+    return cli.parse(argc, argv);
 }

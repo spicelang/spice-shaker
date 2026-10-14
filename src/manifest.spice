@@ -1,362 +1,558 @@
+// Std imports
 import "std/data/vector";
 import "std/io/file";
-import "./semver";
+import "std/text/string-ext";
+import "std/text/toml/toml-value";
+import "std/text/toml/toml-parser";
+import "std/text/toml/toml-serializer";
+
+// Own imports
 import "./util";
-import "./json";
+import "./semver";
+import "./manifest-layout";
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The project manifest (spice.json, the format is defined by the Spice Rack registry) and the lock file (spice.lock.json)
+// The project manifest spice.toml: model, validation and editing. The format is specified in media/manifest-spec.md.
 // ---------------------------------------------------------------------------------------------------------------------
 
-public const string MANIFEST_FILE = "spice.json";
-public const string LOCK_FILE = "spice.lock.json";
+public const string MANIFEST_FILE = "spice.toml";
 public const string PACKAGES_DIR = "spice_packages";
+public const string DEFAULT_ENTRY = "src/main.spice";
 
-// Prefix of dependency constraints that point to a GitHub repository instead of the registry: "github:owner/repo#ref"
-public const string GITHUB_PREFIX = "github:";
+public type DependencySource enum {
+    REGISTRY,
+    GITHUB,
+    PATH
+}
+
+public type Dependency struct {
+    public String name
+    public DependencySource source = DependencySource::REGISTRY
+    public String version // Registry: version constraint
+    public String github  // GitHub: "owner/repo"
+    public String rev     // GitHub: tag, branch or sha; empty for the default branch
+    public String path    // Path: directory relative to the project root
+    public bool dev = false
+}
+
+public f<Dependency> registryDependency(const String& name, const String& constraint) {
+    Dependency dep;
+    dep.name = name;
+    dep.version = constraint;
+    return dep;
+}
+
+public f<Dependency> githubDependency(const String& name, const String& repo, const String& rev) {
+    Dependency dep;
+    dep.name = name;
+    dep.source = DependencySource::GITHUB;
+    dep.github = repo;
+    dep.rev = rev;
+    return dep;
+}
+
+public f<Dependency> pathDependency(const String& name, const String& path) {
+    Dependency dep;
+    dep.name = name;
+    dep.source = DependencySource::PATH;
+    dep.path = path;
+    return dep;
+}
 
 /**
- * Contents of spice.json. Fields shaker does not know are preserved when the file is written back.
+ * Identity of the source as recorded in the lock file: "registry", "github:owner/repo" or "path:<path>"
  */
+public f<String> Dependency.sourceId() {
+    if this.source == DependencySource::GITHUB { return String("github:") + this.github; }
+    if this.source == DependencySource::PATH { return String("path:") + this.path; }
+    return String("registry");
+}
+
+/**
+ * The git ref of a GitHub dependency, "HEAD" for the default branch
+ */
+public f<String> Dependency.ref() {
+    return this.rev.isEmpty() ? String("HEAD") : this.rev;
+}
+
+/**
+ * Short human-readable form of the specification, e.g. "^1.2.0", "github:owner/repo#v1" or "path:../x"
+ */
+public f<String> Dependency.describe() {
+    if this.source == DependencySource::GITHUB {
+        return this.rev.isEmpty() ? this.sourceId() : this.sourceId() + "#" + this.rev;
+    }
+    if this.source == DependencySource::PATH { return this.sourceId(); }
+    return this.version;
+}
+
+public f<bool> Dependency.equals(const Dependency& other) {
+    return this.name == other.name && this.source == other.source && this.version == other.version &&
+           this.github == other.github && this.rev == other.rev && this.path == other.path && this.dev == other.dev;
+}
+
+f<String> tomlString(const String& value) {
+    TomlValue tomlValue = TomlValue(value);
+    TomlSerializer serializer = TomlSerializer(true);
+    return serializer.serializeValue(&tomlValue);
+}
+
+/**
+ * The value of the dependency as written to spice.toml: the short form for registry dependencies, an inline table otherwise
+ */
+public f<String> Dependency.toToml() {
+    if this.source == DependencySource::REGISTRY { return tomlString(this.version); }
+    if this.source == DependencySource::PATH { return String("{ path = ") + tomlString(this.path) + " }"; }
+    String text = String("{ github = ") + tomlString(this.github);
+    if !this.rev.isEmpty() { text += String(", rev = ") + tomlString(this.rev); }
+    return text + " }";
+}
+
 public type Manifest struct {
-    public JV doc
+    public String text // The file content, which edits are applied to
     public String name
     public String version
-    public Vector<KeyValue> dependencies
-    public Vector<KeyValue> devDependencies
+    public String description
+    public String license
+    public Vector<String> authors
+    public String repository
+    public String homepage
+    public String spice   // Constraint on the compiler version, empty if there is none
+    public String entry   // Empty for the default
+    public Vector<Dependency> dependencies // [dependencies] first, then [dev-dependencies], each in file order
 }
 
-public p Manifest.ctor() {
-    this.version = String("0.1.0");
+public f<String> Manifest.getEntry() {
+    return this.entry.isEmpty() ? String(DEFAULT_ENTRY) : this.entry;
 }
 
-/**
- * Replace the entry at an index (value) or remove it (remove = true). The vectors are rebuilt instead of shifted in place.
- */
-public p rebuildWithout(Vector<KeyValue>& list, unsigned long skip, const String& newValue, bool remove) {
-    Vector<KeyValue> rebuilt;
-    for unsigned long i = 0l; i < list.getSize(); i++ {
-        if i != skip { rebuilt.pushBack(list.get(i)); continue; }
-        if !remove { rebuilt.pushBack(KeyValue(list.get(i).key, newValue)); }
-    }
-    list = rebuilt;
-}
-
-public f<long> indexOfKey(const Vector<KeyValue>& list, const String& key) {
-    for unsigned long i = 0l; i < list.getSize(); i++ {
-        if list.get(i).key == key { return cast<long>(i); }
+public f<long> Manifest.indexOf(const String& name) {
+    for unsigned long i = 0l; i < this.dependencies.getSize(); i++ {
+        if this.dependencies.get(i).name == name { return cast<long>(i); }
     }
     return -1l;
 }
 
-public p readDependencies(JV object, Vector<KeyValue>& target) {
-    for JV member = object.first(); member.exists(); member = member.after() {
-        target.pushBack(KeyValue(member.keyName(), member.str()));
-    }
-}
-
-/**
- * Read spice.json from the current directory. Returns false if there is none or it is not valid JSON.
- */
-public f<bool> Manifest.load(string path = MANIFEST_FILE) {
-    Result<String> content = readFile(path);
-    if content.isErr() { return false; }
-    this.doc = parseDoc(content.unwrap());
-    if !this.doc.isObject() { return false; }
-    this.name = this.doc.getStr("name");
-    const String version = this.doc.getStr("version");
-    if !version.isEmpty() { this.version = version; }
-    readDependencies(this.doc.get("dependencies"), this.dependencies);
-    readDependencies(this.doc.get("devDependencies"), this.devDependencies);
-    return true;
-}
-
-/**
- * Set a dependency (or replace its constraint). Returns true if the manifest changed.
- */
-public f<bool> Manifest.setDependency(const String& name, const String& constraint, bool dev) {
-    // A package lives in exactly one of the two sections
-    bool changed = false;
-    if dev {
-        const long otherIdx = indexOfKey(this.dependencies, name);
-        if otherIdx >= 0l { rebuildWithout(this.dependencies, cast<unsigned long>(otherIdx), name, true); changed = true; }
-        return putDependency(this.devDependencies, name, constraint) || changed;
-    }
-    const long otherIdx = indexOfKey(this.devDependencies, name);
-    if otherIdx >= 0l { rebuildWithout(this.devDependencies, cast<unsigned long>(otherIdx), name, true); changed = true; }
-    return putDependency(this.dependencies, name, constraint) || changed;
-}
-
-f<bool> putDependency(Vector<KeyValue>& target, const String& name, const String& constraint) {
-    const long idx = indexOfKey(target, name);
-    if idx < 0l {
-        target.pushBack(KeyValue(name, constraint));
-        return true;
-    }
-    if target.get(cast<unsigned long>(idx)).value == constraint { return false; }
-    rebuildWithout(target, cast<unsigned long>(idx), constraint, false);
-    return true;
-}
-
-public f<bool> Manifest.removeDependency(const String& name) {
-    bool removed = false;
-    const long idx = indexOfKey(this.dependencies, name);
-    if idx >= 0l { rebuildWithout(this.dependencies, cast<unsigned long>(idx), name, true); removed = true; }
-    const long devIdx = indexOfKey(this.devDependencies, name);
-    if devIdx >= 0l { rebuildWithout(this.devDependencies, cast<unsigned long>(devIdx), name, true); removed = true; }
-    return removed;
-}
-
-public f<String> Manifest.getConstraint(const String& name) {
-    long idx = indexOfKey(this.dependencies, name);
-    if idx >= 0l { return this.dependencies.get(cast<unsigned long>(idx)).value; }
-    idx = indexOfKey(this.devDependencies, name);
-    if idx >= 0l { return this.devDependencies.get(cast<unsigned long>(idx)).value; }
-    return String("");
-}
-
-public f<String> Manifest.serialize() {
-    JsonWriter w;
-    w.beginObject();
-    bool hasName = false;
-    bool hasVersion = false;
-    for JV member = this.doc.first(); member.exists(); member = member.after() {
-        const String key = member.keyName();
-        if key == "dependencies" || key == "devDependencies" { continue; }
-        if key == "name" { hasName = true; }
-        if key == "version" { hasVersion = true; }
-        w.key(key);
-        w.copy(member);
-    }
-    if !hasName && !this.name.isEmpty() { w.kStr("name", this.name); }
-    if !hasVersion { w.kStr("version", this.version); }
-    if this.dependencies.getSize() > 0l {
-        w.key("dependencies");
-        w.beginObject();
-        for unsigned long i = 0l; i < this.dependencies.getSize(); i++ {
-            w.kStr(this.dependencies.get(i).key, this.dependencies.get(i).value);
-        }
-        w.endObject();
-    }
-    if this.devDependencies.getSize() > 0l {
-        w.key("devDependencies");
-        w.beginObject();
-        for unsigned long i = 0l; i < this.devDependencies.getSize(); i++ {
-            w.kStr(this.devDependencies.get(i).key, this.devDependencies.get(i).value);
-        }
-        w.endObject();
-    }
-    w.endObject();
-    return w.finishPretty();
-}
-
-public f<bool> Manifest.save(string path = MANIFEST_FILE) {
-    const String text = this.serialize();
-    Result<bool> written = writeFile(path, text.getRaw());
-    return written.isOk();
+public f<bool> Manifest.hasDependencies() {
+    return this.dependencies.getSize() > 0l;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Lock file: which version of which package is installed, where it came from and what it depends on
+// Reading and validation
 // ---------------------------------------------------------------------------------------------------------------------
 
-public type LockEntry struct {
-    public String name
-    public String version
-    public String source                      // "registry" or "github"
-    public Vector<String> dependencies        // Names of the packages this one needs
+f<string> kindName(TomlValue* value) {
+    if value.isString() { return "a string"; }
+    if value.isInteger() { return "an integer"; }
+    if value.isFloat() { return "a float"; }
+    if value.isBool() { return "a boolean"; }
+    if value.isDateTime() { return "a date-time"; }
+    if value.isArray() { return "an array"; }
+    return "a table";
 }
 
-public p LockEntry.ctor() {
-    this.source = String("registry");
-}
-
-public p LockEntry.ctor(const LockEntry& original) {
-    this.name = original.name;
-    this.version = original.version;
-    this.source = original.source;
-    this.dependencies = original.dependencies;
+f<Vector<String>> keyList(string commaSeparated) {
+    return split(String(commaSeparated), ',');
 }
 
 /**
- * Deep-copy assignment, so that entries survive being shifted around inside a vector
+ * Report every key of the table that is not in the list of known keys
  */
-public p operator=(LockEntry& this, const LockEntry& original) {
-    if &this == &original { return; }
-    this.name = original.name;
-    this.version = original.version;
-    this.source = original.source;
-    this.dependencies = original.dependencies;
-}
-
-public p LockEntry.ctor(const String& name, const String& version, const String& source) {
-    this.name = name;
-    this.version = version;
-    this.source = source;
-}
-
-public type Lockfile struct {
-    public Vector<LockEntry> entries
-}
-
-public f<long> Lockfile.indexOf(const String& name) {
-    for unsigned long i = 0l; i < this.entries.getSize(); i++ {
-        if this.entries.get(i).name == name { return cast<long>(i); }
-    }
-    return -1l;
-}
-
-public f<bool> Lockfile.contains(const String& name) {
-    return this.indexOf(name) >= 0l;
-}
-
-public f<LockEntry> Lockfile.get(const String& name) {
-    const long idx = this.indexOf(name);
-    if idx < 0l { return LockEntry(); }
-    return this.entries.get(cast<unsigned long>(idx));
-}
-
-public p Lockfile.set(const LockEntry& entry) {
-    const long idx = this.indexOf(entry.name);
-    if idx < 0l { this.entries.pushBack(entry); }
-    else {
-        Vector<LockEntry> rebuilt;
-        for unsigned long i = 0l; i < this.entries.getSize(); i++ {
-            if cast<long>(i) == idx { rebuilt.pushBack(entry); } else { rebuilt.pushBack(this.entries.get(i)); }
-        }
-        this.entries = rebuilt;
+p checkKeys(TomlValue* table, const Vector<String>& known, const String& where, Vector<String>& errors) {
+    for unsigned long i = 0l; i < table.getTableSize(); i++ {
+        const String& key = table.getTableKey(i);
+        if containsString(known, key) { continue; }
+        String message = where + "unknown key '" + key + "'";
+        const String suggestion = closestMatch(key, known);
+        if !suggestion.isEmpty() { message += String(" (did you mean '") + suggestion + "'?)"; }
+        errors.pushBack(message);
     }
 }
 
-public p Lockfile.drop(const String& name) {
-    const long idx = this.indexOf(name);
-    if idx < 0l { return; }
-    Vector<LockEntry> rebuilt;
-    for unsigned long i = 0l; i < this.entries.getSize(); i++ {
-        if cast<long>(i) != idx { rebuilt.pushBack(this.entries.get(i)); }
+/**
+ * Read an optional string. Returns false if the key is missing or has another type (which is reported).
+ */
+#[ignoreUnusedReturnValue]
+f<bool> readString(TomlValue* table, string key, const String& where, String& target, Vector<String>& errors) {
+    TomlValue* value = table.getFieldOrNil(key);
+    if value == nil<TomlValue*> { return false; }
+    if !value.isString() {
+        errors.pushBack(where + "'" + key + "' has to be a string, not " + kindName(value));
+        return false;
     }
-    this.entries = rebuilt;
+    target = value.getString();
+    return true;
 }
 
-public f<bool> Lockfile.load(string path = LOCK_FILE) {
-    Result<String> content = readFile(path);
-    if content.isErr() { return false; }
-    JV doc = parseDoc(content.unwrap());
-    JV packages = doc.get("packages");
-    for JV item = packages.first(); item.exists(); item = item.after() {
-        LockEntry entry = LockEntry(item.keyName(), item.getStr("version"), item.getStr("source"));
-        JV deps = item.get("dependencies");
-        for JV dep = deps.first(); dep.exists(); dep = dep.after() { entry.dependencies.pushBack(dep.str()); }
-        this.entries.pushBack(entry);
+f<bool> isValidEntry(const String& entry) {
+    if entry.isEmpty() || entry.startsWith("/") || entry.contains("\\") || entry.contains(":") || !entry.endsWith(".spice") {
+        return false;
+    }
+    const Vector<String> parts = split(entry, '/');
+    for unsigned long i = 0l; i < parts.getSize(); i++ {
+        const String& part = parts.get(i);
+        if part.isEmpty() || part == ".." { return false; }
     }
     return true;
 }
 
-public f<String> Lockfile.serialize() {
-    JsonWriter w;
-    w.beginObject();
-    w.kNum("lockVersion", 1l);
-    w.key("packages");
-    w.beginObject();
-    // Sorted by name, so the file produces small diffs
-    Vector<String> names;
-    for unsigned long i = 0l; i < this.entries.getSize(); i++ { names.pushBack(this.entries.get(i).name); }
-    sortStrings(names);
-    for unsigned long i = 0l; i < names.getSize(); i++ {
-        const LockEntry entry = this.get(names.get(i));
-        w.key(entry.name);
-        w.beginObject();
-        w.kStr("version", entry.version);
-        w.kStr("source", entry.source);
-        w.key("dependencies");
-        w.beginArray();
-        for unsigned long k = 0l; k < entry.dependencies.getSize(); k++ { w.str(entry.dependencies.get(k)); }
-        w.endArray();
-        w.endObject();
+p parsePackageTable(TomlValue* table, const String& label, Manifest& manifest, Vector<String>& errors) {
+    const String where = label + ": [package] ";
+    checkKeys(table, keyList("name,version,description,license,authors,repository,homepage,spice,entry"), where, errors);
+
+    if !readString(table, "name", where, manifest.name, errors) {
+        if !table.hasField("name") { errors.pushBack(where + "'name' is missing"); }
+    } else if !isValidPackageName(manifest.name) {
+        errors.pushBack(where + "'name' is not a valid package name: lower-case letters, digits, '-' and '_', starting with " +
+                        "a letter or digit");
     }
-    w.endObject();
-    w.endObject();
-    return w.finishPretty();
+    if !readString(table, "version", where, manifest.version, errors) {
+        if !table.hasField("version") { errors.pushBack(where + "'version' is missing"); }
+    } else if !isStrictSemver(manifest.version) {
+        errors.pushBack(where + "'version' is not a valid semantic version like 1.2.3");
+    }
+    readString(table, "description", where, manifest.description, errors);
+    readString(table, "license", where, manifest.license, errors);
+    readString(table, "repository", where, manifest.repository, errors);
+    readString(table, "homepage", where, manifest.homepage, errors);
+    if readString(table, "spice", where, manifest.spice, errors) && !isValidConstraint(manifest.spice) {
+        errors.pushBack(where + "'spice' is not a valid version constraint");
+    }
+    if readString(table, "entry", where, manifest.entry, errors) && !isValidEntry(manifest.entry) {
+        errors.pushBack(where + "'entry' has to be a relative path with '/' as separator, without '..', ending in .spice");
+    }
+    TomlValue* authors = table.getFieldOrNil("authors");
+    if authors != nil<TomlValue*> {
+        if !authors.isArray() {
+            errors.pushBack(where + "'authors' has to be an array of strings, not " + kindName(authors));
+        } else {
+            for unsigned long i = 0l; i < authors.getArraySize(); i++ {
+                TomlValue* author = authors.getArrayItem(i);
+                if author.isString() { manifest.authors.pushBack(author.getString()); }
+                else { errors.pushBack(where + "'authors' has to be an array of strings"); break; }
+            }
+        }
+    }
 }
 
-public f<bool> Lockfile.save(string path = LOCK_FILE) {
-    const String text = this.serialize();
-    Result<bool> written = writeFile(path, text.getRaw());
-    return written.isOk();
+f<bool> parseDependency(const String& name, TomlValue* value, bool dev, const String& section, Dependency& dep,
+                        Vector<String>& errors) {
+    const String where = section + name + ": ";
+    const unsigned long errorCount = errors.getSize();
+    dep.name = name;
+    dep.dev = dev;
+    if !isValidPackageName(name) {
+        errors.pushBack(where + "not a valid dependency name: lower-case letters, digits, '-' and '_', starting with a letter " +
+                        "or digit");
+    }
+    if value.isString() {
+        dep.version = value.getString();
+        if !isValidConstraint(dep.version) { errors.pushBack(where + "'" + dep.version + "' is not a valid version constraint"); }
+        return errors.getSize() == errorCount;
+    }
+    if !value.isTable() {
+        errors.pushBack(where + "has to be a version constraint or an inline table, not " + kindName(value));
+        return false;
+    }
+    checkKeys(value, keyList("version,github,rev,path"), where, errors);
+    const bool hasVersion = readString(value, "version", where, dep.version, errors);
+    const bool hasGithub = readString(value, "github", where, dep.github, errors);
+    const bool hasRev = readString(value, "rev", where, dep.rev, errors);
+    const bool hasPath = readString(value, "path", where, dep.path, errors);
+    const int sources = (hasVersion ? 1 : 0) + (hasGithub ? 1 : 0) + (hasPath ? 1 : 0);
+    if sources == 0 {
+        errors.pushBack(where + "needs one of 'version', 'github' or 'path'");
+    } else if sources > 1 {
+        errors.pushBack(where + "has more than one of 'version', 'github' and 'path'");
+    }
+    if hasRev && !hasGithub { errors.pushBack(where + "'rev' is only allowed together with 'github'"); }
+    if hasVersion && !isValidConstraint(dep.version) {
+        errors.pushBack(where + "'" + dep.version + "' is not a valid version constraint");
+    }
+    if hasGithub {
+        dep.source = DependencySource::GITHUB;
+        if !isValidGithubRepo(dep.github) { errors.pushBack(where + "'github' has to be owner/repo"); }
+    }
+    if hasRev && !isValidGitRef(dep.rev) { errors.pushBack(where + "'rev' is not a valid git ref"); }
+    if hasPath {
+        dep.source = DependencySource::PATH;
+        if dep.path.isEmpty() || dep.path.contains("\\") { errors.pushBack(where + "'path' has to be a path with '/' as separator"); }
+    }
+    return errors.getSize() == errorCount;
+}
+
+p parseDependencyTable(TomlValue* table, bool dev, const String& label, Manifest& manifest, Vector<String>& errors) {
+    const String section = label + ": [" + (dev ? SECTION_DEV_DEPENDENCIES : SECTION_DEPENDENCIES) + "] ";
+    for unsigned long i = 0l; i < table.getTableSize(); i++ {
+        const String& name = table.getTableKey(i);
+        TomlValue* value = table.getTableValue(i);
+        Dependency dep;
+        if !parseDependency(name, value, dev, section, dep, errors) { continue; }
+        if manifest.indexOf(name) >= 0l {
+            errors.pushBack(section + name + ": listed in both [dependencies] and [dev-dependencies]");
+            continue;
+        }
+        manifest.dependencies.pushBack(dep);
+    }
 }
 
 /**
- * Insertion sort; the lists of packages are short
+ * Check that every dependency is a single line in its section, as the editing of the file requires
  */
-public p sortStrings(Vector<String>& list) {
-    Vector<String> sorted;
-    for unsigned long i = 0l; i < list.getSize(); i++ {
-        unsigned long pos = 0l;
-        while pos < sorted.getSize() && !isStringBefore(list.get(i), sorted.get(pos)) { pos++; }
-        sorted.insertAt(pos, list.get(i));
+p checkLayout(const String& text, const String& label, Manifest& manifest, Vector<String>& errors) {
+    const ManifestLayout layout = scanManifest(text);
+    for unsigned long i = 0l; i < layout.problems.getSize(); i++ { errors.pushBack(label + ": " + layout.problems.get(i)); }
+    for unsigned long i = 0l; i < manifest.dependencies.getSize(); i++ {
+        const Dependency& dep = manifest.dependencies.get(i);
+        const long idx = layout.indexOf(dep.name);
+        bool found = idx >= 0l;
+        if found {
+            const DependencyLine& line = layout.entries.get(cast<unsigned long>(idx));
+            found = line.dev == dep.dev;
+        }
+        if !found {
+            errors.pushBack(label + ": dependency '" + dep.name + "' has to be written as one line '" + dep.name +
+                            " = ...' below a [" + (dep.dev ? SECTION_DEV_DEPENDENCIES : SECTION_DEPENDENCIES) + "] header");
+        }
     }
-    list = sorted;
+}
+
+/**
+ * Parse and validate the content of a spice.toml. `label` names the file in messages. Returns false if there were errors.
+ */
+public f<bool> parseManifest(const String& text, const String& label, Manifest& manifest, Vector<String>& errors) {
+    const unsigned long errorCount = errors.getSize();
+    manifest.text = text;
+    Result<TomlValue*> parsed = parseToml(text);
+    if parsed.isErr() {
+        const Error& error = parsed.getErr();
+        errors.pushBack(label + ": invalid TOML: " + error.getMessage());
+        return false;
+    }
+    TomlValue* root = parsed.unwrap();
+    checkKeys(root, keyList("package,dependencies,dev-dependencies,tool"), label + ": ", errors);
+
+    TomlValue* packageTable = root.getFieldOrNil("package");
+    if packageTable == nil<TomlValue*> {
+        errors.pushBack(label + ": the [package] table is missing");
+    } else if !packageTable.isTable() {
+        errors.pushBack(label + ": 'package' has to be a table");
+    } else {
+        parsePackageTable(packageTable, label, manifest, errors);
+    }
+    for int pass = 0; pass < 2; pass++ {
+        const bool dev = pass == 1;
+        TomlValue* table = root.getFieldOrNil(dev ? SECTION_DEV_DEPENDENCIES : SECTION_DEPENDENCIES);
+        if table == nil<TomlValue*> { continue; }
+        if !table.isTable() {
+            errors.pushBack(label + ": '" + (dev ? SECTION_DEV_DEPENDENCIES : SECTION_DEPENDENCIES) + "' has to be a table");
+            continue;
+        }
+        parseDependencyTable(table, dev, label, manifest, errors);
+    }
+    TomlValue* tool = root.getFieldOrNil("tool");
+    if tool != nil<TomlValue*> && !tool.isTable() { errors.pushBack(label + ": 'tool' has to be a table"); }
+    deleteTomlValue(root);
+
+    if errors.getSize() == errorCount { checkLayout(text, label, manifest, errors); }
+    return errors.getSize() == errorCount;
+}
+
+/**
+ * Read and validate a spice.toml from disk
+ */
+public f<bool> loadManifest(const String& path, const String& label, Manifest& manifest, Vector<String>& errors) {
+    Result<String> content = readFile(path.getRaw());
+    if content.isErr() {
+        errors.pushBack(String("Could not read ") + label);
+        return false;
+    }
+    return parseManifest(content.unwrap(), label, manifest, errors);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------------------------------------------------
+
+p addStringField(TomlValue* table, string key, const String& value) {
+    if !value.isEmpty() { table.addTableField(String(key), __new<TomlValue>(value)); }
+}
+
+/**
+ * Text of a new spice.toml with the metadata and dependencies of the given manifest
+ */
+public f<String> renderManifest(const Manifest& manifest) {
+    TomlValue* root = __new<TomlValue>(TomlValueKind::TOML_TABLE);
+    TomlValue* packageTable = __new<TomlValue>(TomlValueKind::TOML_TABLE);
+    addStringField(packageTable, "name", manifest.name);
+    addStringField(packageTable, "version", manifest.version);
+    addStringField(packageTable, "description", manifest.description);
+    addStringField(packageTable, "license", manifest.license);
+    if manifest.authors.getSize() > 0l {
+        TomlValue* authors = __new<TomlValue>(TomlValueKind::TOML_ARRAY);
+        for unsigned long i = 0l; i < manifest.authors.getSize(); i++ { authors.addArrayItem(__new<TomlValue>(manifest.authors.get(i))); }
+        packageTable.addTableField(String("authors"), authors);
+    }
+    addStringField(packageTable, "repository", manifest.repository);
+    addStringField(packageTable, "homepage", manifest.homepage);
+    addStringField(packageTable, "spice", manifest.spice);
+    addStringField(packageTable, "entry", manifest.entry);
+    root.addTableField(String("package"), packageTable);
+    // The dependencies are added line by line below, so that they get the one-line form
+    root.addTableField(String(SECTION_DEPENDENCIES), __new<TomlValue>(TomlValueKind::TOML_TABLE));
+    TomlSerializer serializer;
+    String text = serializer.serialize(root);
+    deleteTomlValue(root);
+    for unsigned long i = 0l; i < manifest.dependencies.getSize(); i++ {
+        const Dependency& dep = manifest.dependencies.get(i);
+        text = setDependencyLine(text, dep.name, dep.toToml(), dep.dev);
+    }
+    return text;
+}
+
+/**
+ * Check that re-reading an edited text gives exactly the expected dependencies, and take it over if so
+ */
+f<bool> Manifest.adoptEdit(const String& newText, const Vector<Dependency>& expected, Vector<String>& errors) {
+    Manifest edited;
+    Vector<String> editErrors;
+    bool same = parseManifest(newText, String(MANIFEST_FILE), edited, editErrors);
+    same = same && edited.dependencies.getSize() == expected.getSize();
+    for unsigned long i = 0l; i < expected.getSize() && same; i++ {
+        const Dependency& want = expected.get(i);
+        const long idx = edited.indexOf(want.name);
+        same = idx >= 0l;
+        if same {
+            const Dependency& got = edited.dependencies.get(cast<unsigned long>(idx));
+            same = got.equals(want);
+        }
+    }
+    if !same {
+        errors.pushBack(String("Could not edit ") + MANIFEST_FILE + " safely, please change it by hand");
+        return false;
+    }
+    *this = edited;
+    return true;
+}
+
+/**
+ * Add a dependency or replace the one with the same name, which may also move it to the other table
+ */
+public f<bool> Manifest.setDependency(const Dependency& dep, Vector<String>& errors) {
+    Vector<Dependency> expected;
+    for unsigned long i = 0l; i < this.dependencies.getSize(); i++ {
+        const Dependency& existing = this.dependencies.get(i);
+        if existing.name != dep.name { expected.pushBack(existing); }
+    }
+    expected.pushBack(dep);
+    const String newText = setDependencyLine(this.text, dep.name, dep.toToml(), dep.dev);
+    return this.adoptEdit(newText, expected, errors);
+}
+
+public f<bool> Manifest.removeDependency(const String& name, Vector<String>& errors) {
+    Vector<Dependency> expected;
+    for unsigned long i = 0l; i < this.dependencies.getSize(); i++ {
+        const Dependency& existing = this.dependencies.get(i);
+        if existing.name != name { expected.pushBack(existing); }
+    }
+    const String newText = removeDependencyLine(this.text, name);
+    return this.adoptEdit(newText, expected, errors);
+}
+
+public f<bool> Manifest.save(const String& path = String(MANIFEST_FILE)) {
+    return writeTextFile(path, this.text);
 }
 
 #[test]
-f<bool> testManifestRoundTrip() {
+f<bool> testParseManifest() {
+    const String text = String("[package]\nname = \"my-app\"\nversion = \"0.1.0\"\nauthors = [\"A <a@b.c>\"]\nspice = \">=0.29.0\"\n") +
+                        "entry = \"src/lib.spice\"\n\n[dependencies]\njson-parser = \"^1.2.0\"\nhttp = { github = \"o/Http\", rev = \"v1\" }\n" +
+                        "local = { path = \"../local\" } # here\n\n[dev-dependencies]\ntest-kit = { version = \"~1.2.0\" }\n\n" +
+                        "[tool.linter]\nanything = [1, 2]\n";
     Manifest manifest;
-    manifest.doc = parseDoc(String("{\"name\":\"app\",\"license\":\"MIT\",\"dependencies\":{\"a\":\"^1.0.0\"}}"));
-    manifest.name = manifest.doc.getStr("name");
-    JV existing = manifest.doc.get("dependencies");
-    readDependencies(existing, manifest.dependencies);
-    assert manifest.dependencies.getSize() == 1l;
-    const String a = String("a");
-    const String b = String("b");
-    const String t = String("t");
-    const String any = String("*");
-    const String tilde = String("~2.0.0");
-    const String caret = String("^1.0.0");
-    const String oneX = String("1.x");
-    bool changed = manifest.setDependency(b, any, false);
-    assert changed;
-    changed = manifest.setDependency(t, oneX, true);
-    assert changed;
-    changed = manifest.setDependency(b, any, false);
-    assert !changed;
-    changed = manifest.setDependency(b, tilde, false);
-    assert changed;
-    // Moving a package between the sections
-    changed = manifest.setDependency(a, caret, true);
-    assert changed;
-    assert manifest.dependencies.getSize() == 1l && manifest.devDependencies.getSize() == 2l;
-    const String text = manifest.serialize();
-    JV out = parseDoc(text);
-    assert out.getStr("license") == "MIT";
-    JV deps = out.get("dependencies");
-    assert deps.getStr("b") == "~2.0.0";
-    JV devDeps = out.get("devDependencies");
-    assert devDeps.getStr("a") == "^1.0.0";
-    assert manifest.removeDependency(a);
-    assert !manifest.removeDependency(a);
-    assert manifest.getConstraint(t) == "1.x";
+    Vector<String> errors;
+    assert parseManifest(text, String("spice.toml"), manifest, errors);
+    assert manifest.name == "my-app" && manifest.version == "0.1.0" && manifest.spice == ">=0.29.0";
+    assert manifest.authors.getSize() == 1l;
+    assert manifest.getEntry() == "src/lib.spice";
+    assert manifest.dependencies.getSize() == 4l;
+    const Dependency& json = manifest.dependencies.get(0l);
+    assert json.source == DependencySource::REGISTRY && json.version == "^1.2.0" && !json.dev;
+    const Dependency& http = manifest.dependencies.get(1l);
+    assert http.source == DependencySource::GITHUB && http.github == "o/Http" && http.rev == "v1";
+    assert http.sourceId() == "github:o/Http";
+    const Dependency& local = manifest.dependencies.get(2l);
+    assert local.source == DependencySource::PATH && local.path == "../local";
+    const Dependency& testKit = manifest.dependencies.get(3l);
+    assert testKit.dev && testKit.version == "~1.2.0";
     return true;
 }
 
 #[test]
-f<bool> testLockfileRoundTrip() {
-    Lockfile lock;
-    LockEntry bEntry = LockEntry(String("b"), String("1.0.0"), String("registry"));
-    bEntry.dependencies.pushBack(String("a"));
-    lock.set(bEntry);
-    lock.set(LockEntry(String("a"), String("2.1.0"), String("github")));
-    lock.set(LockEntry(String("a"), String("2.2.0"), String("github")));
-    assert lock.entries.getSize() == 2l;
-    JV out = parseDoc(lock.serialize());
-    JV packages = out.get("packages");
-    JV first = packages.first();
-    assert first.keyName() == "a";
-    assert first.getStr("version") == "2.2.0";
-    JV b = packages.get("b");
-    JV bDeps = b.get("dependencies");
-    JV bFirstDep = bDeps.first();
-    assert bFirstDep.str() == "a";
-    lock.drop(String("a"));
-    assert !lock.contains(String("a")) && lock.contains(String("b"));
+f<bool> testManifestErrors() {
+    const String text = String("[package]\nname = \"My App\"\nverison = \"1\"\n\n[dependencies]\na = { github = \"x\", path = \"y\" }\n") +
+                        "b = { version = \"^1\", rev = \"x\" }\nc = 5\nd = \"not a constraint\"\n\n[dev-dependencies]\na = \"1\"\n\n[extra]\n";
+    Manifest manifest;
+    Vector<String> errors;
+    assert !parseManifest(text, String("spice.toml"), manifest, errors);
+    // name, verison (unknown, with suggestion), version missing, a (two sources, github), b (rev), c (type), d, extra
+    String all;
+    for unsigned long i = 0l; i < errors.getSize(); i++ { all += errors.get(i) + "\n"; }
+    assert all.contains("[package] 'name' is not a valid package name");
+    assert all.contains("unknown key 'verison' (did you mean 'version'?)");
+    assert all.contains("'version' is missing");
+    assert all.contains("a: has more than one of");
+    assert all.contains("b: 'rev' is only allowed together with 'github'");
+    assert all.contains("c: has to be a version constraint or an inline table, not an integer");
+    assert all.contains("d: 'not a constraint' is not a valid version constraint");
+    assert all.contains("spice.toml: unknown key 'extra'");
+
+    Manifest dotted;
+    Vector<String> dottedErrors;
+    assert !parseManifest(String("[package]\nname = \"a\"\nversion = \"1.0.0\"\n[dependencies.b]\nversion = \"1\"\n"),
+                          String("spice.toml"), dotted, dottedErrors);
+    Manifest invalid;
+    Vector<String> invalidErrors;
+    assert !parseManifest(String("[package\n"), String("spice.toml"), invalid, invalidErrors);
+    const String& invalidMessage = invalidErrors.get(0l);
+    assert invalidMessage.startsWith("spice.toml: invalid TOML");
+    return true;
+}
+
+#[test]
+f<bool> testEditManifest() {
+    Manifest manifest;
+    Vector<String> errors;
+    assert parseManifest(String("# Mine\n[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\na = \"^1.0.0\" # pinned\n"),
+                         String("spice.toml"), manifest, errors);
+    assert manifest.setDependency(githubDependency(String("b"), String("o/b"), String("")), errors);
+    Dependency dev = registryDependency(String("a"), String("^2.0.0"));
+    dev.dev = true;
+    assert manifest.setDependency(dev, errors);
+    assert manifest.text == "# Mine\n[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\nb = { github = \"o/b\" }\n\n" +
+                            "[dev-dependencies]\na = \"^2.0.0\"\n";
+    assert manifest.removeDependency(String("b"), errors);
+    assert manifest.dependencies.getSize() == 1l;
+    assert errors.getSize() == 0l;
+    return true;
+}
+
+#[test]
+f<bool> testRenderManifest() {
+    Manifest manifest;
+    manifest.name = String("app");
+    manifest.version = String("0.1.0");
+    manifest.authors.pushBack(String("Me"));
+    const String initText = renderManifest(manifest);
+    assert initText == "[package]\nname = \"app\"\nversion = \"0.1.0\"\nauthors = [\"Me\"]\n\n[dependencies]\n";
+    manifest.dependencies.pushBack(pathDependency(String("x"), String("../x")));
+    Dependency dev = registryDependency(String("y"), String("*"));
+    dev.dev = true;
+    manifest.dependencies.pushBack(dev);
+    const String text = renderManifest(manifest);
+    Manifest parsed;
+    Vector<String> errors;
+    assert parseManifest(text, String("spice.toml"), parsed, errors);
+    assert parsed.dependencies.getSize() == 2l;
     return true;
 }

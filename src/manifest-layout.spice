@@ -1,0 +1,306 @@
+// Std imports
+import "std/data/vector";
+import "std/text/analysis";
+import "std/type/type-conversion";
+
+// Own imports
+import "./util";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Line-level view of spice.toml, used to edit dependencies without touching anything else in the file.
+//
+// The std TOML parser produces a value tree without comments, so writing the tree back would lose them. Instead, this scanner
+// finds the line of every dependency, and edits replace, insert or delete exactly those lines. This works because every
+// dependency has to be a single `name = value` line inside a [dependencies] or [dev-dependencies] section (see the spec in
+// media/manifest-spec.md). The scanner does not validate TOML; the manifest is always parsed by the std parser as well.
+// ---------------------------------------------------------------------------------------------------------------------
+
+public const string SECTION_DEPENDENCIES = "dependencies";
+public const string SECTION_DEV_DEPENDENCIES = "dev-dependencies";
+
+public type DependencyLine struct {
+    public String name
+    public bool dev = false
+    public unsigned long line = 0l       // Index into ManifestLayout.lines
+    public unsigned long valueStart = 0l // Column where the value starts
+    public unsigned long valueEnd = 0l   // Column after the value, before trailing spaces and the comment
+}
+
+public type ManifestLayout struct {
+    public Vector<String> lines
+    public Vector<DependencyLine> entries
+    public long dependenciesHeader = -1l    // Line index of [dependencies], -1 if there is none
+    public long devDependenciesHeader = -1l // Line index of [dev-dependencies], -1 if there is none
+    public Vector<String> problems          // Violations of the single-line rule
+}
+
+/**
+ * State of the value lexer, which is carried from one line to the next
+ */
+type LexState struct {
+    public String openMultiline // `"""` or `'''` while inside a multi-line string, empty otherwise
+    public long depth = 0l      // Nesting of brackets and braces, so that multi-line arrays are not mistaken for headers
+}
+
+f<bool> isBareKeyChar(char c) {
+    return isAlphaNum(c) || c == '-' || c == '_';
+}
+
+f<bool> matchesAt(const String& text, unsigned long pos, string needle) {
+    const String n = String(needle);
+    if pos + n.getLength() > text.getLength() { return false; }
+    for unsigned long i = 0l; i < n.getLength(); i++ {
+        if text[pos + i] != n[i] { return false; }
+    }
+    return true;
+}
+
+/**
+ * Lex a line (or the rest of it) from `pos` on. Skips strings, tracks the bracket depth and stops at a comment.
+ * Returns the column where the meaningful content ends, i.e. before trailing spaces and the comment.
+ */
+#[ignoreUnusedReturnValue]
+f<unsigned long> lexLine(const String& line, unsigned long pos, LexState& state) {
+    const unsigned long len = line.getLength();
+    unsigned long contentEnd = pos;
+    unsigned long i = pos;
+    while i < len {
+        // Continue a multi-line string that was opened before
+        if !state.openMultiline.isEmpty() {
+            const bool basic = state.openMultiline == "\"\"\"";
+            while i < len && !matchesAt(line, i, state.openMultiline.getRaw()) {
+                if basic && line[i] == '\\' { i++; }
+                i++;
+            }
+            if i >= len { return len; }
+            i += 3l;
+            // A multi-line string may end with up to two additional quotes
+            const char quote = basic ? '"' : '\'';
+            while i < len && line[i] == quote { i++; }
+            state.openMultiline = String("");
+            contentEnd = i;
+            continue;
+        }
+        const char c = line[i];
+        if c == '#' { break; }
+        if matchesAt(line, i, "\"\"\"") || matchesAt(line, i, "'''") {
+            state.openMultiline = line.getSubstring(i, 3l);
+            i += 3l;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            i++;
+            while i < len && line[i] != c {
+                if c == '"' && line[i] == '\\' { i++; }
+                i++;
+            }
+            i++;
+            contentEnd = i < len ? i : len;
+            continue;
+        }
+        if c == '[' || c == '{' { state.depth++; }
+        if c == ']' || c == '}' { state.depth--; }
+        if !isWhitespace(c) { contentEnd = i + 1l; }
+        i++;
+    }
+    return contentEnd;
+}
+
+/**
+ * Name of a table header line like `[name]`, `[ name ] # comment` or `[[name]]`. Empty if the line is no header.
+ */
+f<String> headerName(const String& trimmed) {
+    if !trimmed.startsWith("[") { return String(""); }
+    const bool arrayHeader = trimmed.startsWith("[[");
+    const unsigned long start = arrayHeader ? 2l : 1l;
+    const long close = trimmed.find(']', start);
+    if close < 0l { return String(""); }
+    const String name = trimmed.getSubstring(start, close - cast<long>(start));
+    return name.trim();
+}
+
+public f<ManifestLayout> scanManifest(const String& text) {
+    ManifestLayout layout;
+    layout.lines = splitLines(text);
+    LexState state;
+    String section;
+    for unsigned long lineIdx = 0l; lineIdx < layout.lines.getSize(); lineIdx++ {
+        const String& line = layout.lines.get(lineIdx);
+        if !state.openMultiline.isEmpty() || state.depth > 0l {
+            lexLine(line, 0l, state);
+            continue;
+        }
+        const String trimmed = line.trim();
+        if trimmed.isEmpty() || trimmed.startsWith("#") { continue; }
+
+        if trimmed.startsWith("[") {
+            section = headerName(trimmed);
+            if section == SECTION_DEPENDENCIES { layout.dependenciesHeader = cast<long>(lineIdx); }
+            if section == SECTION_DEV_DEPENDENCIES { layout.devDependenciesHeader = cast<long>(lineIdx); }
+            if section.startsWith("dependencies.") || section.startsWith("dev-dependencies.") {
+                layout.problems.pushBack(String("line ") + toString(lineIdx + 1l) + ": dependencies must be written as one " +
+                                         "line each, e.g. name = { github = \"owner/repo\" }, not as [" + section + "]");
+            }
+            continue;
+        }
+
+        const bool dependencySection = section == SECTION_DEPENDENCIES || section == SECTION_DEV_DEPENDENCIES;
+        if !dependencySection {
+            lexLine(line, 0l, state);
+            continue;
+        }
+
+        // A dependency line: <bare key> = <value> [# comment]
+        unsigned long pos = 0l;
+        while pos < line.getLength() && isWhitespace(line[pos]) { pos++; }
+        const unsigned long keyStart = pos;
+        while pos < line.getLength() && isBareKeyChar(line[pos]) { pos++; }
+        const String key = line.getSubstring(keyStart, cast<long>(pos - keyStart));
+        while pos < line.getLength() && isWhitespace(line[pos]) { pos++; }
+        if key.isEmpty() || pos >= line.getLength() || line[pos] != '=' {
+            layout.problems.pushBack(String("line ") + toString(lineIdx + 1l) + ": dependencies must be written as " +
+                                     "name = value, with a bare name (no quotes, no dots)");
+            lexLine(line, pos, state);
+            continue;
+        }
+        pos++;
+        while pos < line.getLength() && isWhitespace(line[pos]) { pos++; }
+        DependencyLine entry;
+        entry.name = key;
+        entry.dev = section == SECTION_DEV_DEPENDENCIES;
+        entry.line = lineIdx;
+        entry.valueStart = pos;
+        entry.valueEnd = lexLine(line, pos, state);
+        if !state.openMultiline.isEmpty() || state.depth > 0l {
+            layout.problems.pushBack(String("line ") + toString(lineIdx + 1l) + ": the value of dependency '" + key +
+                                     "' has to fit on one line");
+        }
+        layout.entries.pushBack(entry);
+    }
+    return layout;
+}
+
+public f<long> ManifestLayout.indexOf(const String& name) {
+    for unsigned long i = 0l; i < this.entries.getSize(); i++ {
+        if this.entries.get(i).name == name { return cast<long>(i); }
+    }
+    return -1l;
+}
+
+/**
+ * Lines with the given line replaced (replace = true) or removed
+ */
+f<Vector<String>> withLine(const Vector<String>& lines, unsigned long target, const String& replacement, bool replace) {
+    Vector<String> edited;
+    for unsigned long i = 0l; i < lines.getSize(); i++ {
+        if i != target { edited.pushBack(lines.get(i)); continue; }
+        if replace { edited.pushBack(replacement); }
+    }
+    return edited;
+}
+
+/**
+ * Text with the dependency line of `name` removed. Returns the text unchanged if there is no such line.
+ */
+public f<String> removeDependencyLine(const String& text, const String& name) {
+    const ManifestLayout layout = scanManifest(text);
+    const long idx = layout.indexOf(name);
+    if idx < 0l { return text; }
+    const DependencyLine& entry = layout.entries.get(cast<unsigned long>(idx));
+    return joinLines(withLine(layout.lines, entry.line, String(""), false));
+}
+
+/**
+ * Text with the dependency `name` set to `value` (already formatted as TOML) in the given section. An existing line in the
+ * same section keeps its position and comment; a line in the other section is moved.
+ */
+public f<String> setDependencyLine(const String& text, const String& name, const String& value, bool dev) {
+    ManifestLayout layout = scanManifest(text);
+    const long idx = layout.indexOf(name);
+    if idx >= 0l {
+        const DependencyLine& entry = layout.entries.get(cast<unsigned long>(idx));
+        if entry.dev == dev {
+            const String& line = layout.lines.get(entry.line);
+            const String updated = line.getSubstring(0l, cast<long>(entry.valueStart)) + value + line.getSubstring(entry.valueEnd);
+            return joinLines(withLine(layout.lines, entry.line, updated, true));
+        }
+        layout = scanManifest(removeDependencyLine(text, name));
+    }
+
+    const String newLine = name + " = " + value;
+    const long header = dev ? layout.devDependenciesHeader : layout.dependenciesHeader;
+    if header < 0l {
+        Vector<String> lines = layout.lines;
+        if lines.getSize() > 0l {
+            const String& lastLine = lines.back();
+            const String lastTrimmed = lastLine.trim();
+            if !lastTrimmed.isEmpty() { lines.pushBack(String("")); }
+        }
+        lines.pushBack(String("[") + (dev ? SECTION_DEV_DEPENDENCIES : SECTION_DEPENDENCIES) + "]");
+        lines.pushBack(newLine);
+        return joinLines(lines);
+    }
+    // Insert after the last dependency of the section, or right after the header if it has none
+    unsigned long insertAfter = cast<unsigned long>(header);
+    for unsigned long i = 0l; i < layout.entries.getSize(); i++ {
+        const DependencyLine& entry = layout.entries.get(i);
+        if entry.dev == dev && entry.line > insertAfter { insertAfter = entry.line; }
+    }
+    Vector<String> lines = layout.lines;
+    lines.insertAt(insertAfter + 1l, newLine);
+    return joinLines(lines);
+}
+
+#[test]
+f<bool> testScanManifest() {
+    const String text = String("[package]\nname = \"x\" # [dependencies]\ndescription = \"\"\"\n[dependencies]\nnot = \"a dep\"\n\"\"\"\n") +
+                        "authors = [\n  \"a\",\n]\n\n[dependencies]\n# comment\na = \"^1.0.0\" # pinned\nb-c = { github = \"o/r\", rev = \"x#y\" }\n" +
+                        "\n[ dev-dependencies ]\nt = '1.x'\n";
+    const ManifestLayout layout = scanManifest(text);
+    assert layout.problems.getSize() == 0l;
+    assert layout.entries.getSize() == 3l;
+    assert layout.dependenciesHeader == 10l;
+    assert layout.devDependenciesHeader == 15l;
+    const DependencyLine& a = layout.entries.get(0l);
+    assert a.name == "a" && !a.dev && a.line == 12l;
+    const String& aLine = layout.lines.get(a.line);
+    assert aLine.getSubstring(a.valueStart, cast<long>(a.valueEnd - a.valueStart)) == "\"^1.0.0\"";
+    const DependencyLine& b = layout.entries.get(1l);
+    const String& bLine = layout.lines.get(b.line);
+    assert bLine.getSubstring(b.valueStart, cast<long>(b.valueEnd - b.valueStart)) == "{ github = \"o/r\", rev = \"x#y\" }";
+    const DependencyLine& t = layout.entries.get(2l);
+    assert t.name == "t" && t.dev;
+    return true;
+}
+
+#[test]
+f<bool> testScanManifestProblems() {
+    const ManifestLayout dotted = scanManifest(String("[dependencies]\na.version = \"1\"\n"));
+    assert dotted.problems.getSize() == 1l;
+    const ManifestLayout quoted = scanManifest(String("[dependencies]\n\"a\" = \"1\"\n"));
+    assert quoted.problems.getSize() == 1l;
+    const ManifestLayout subTable = scanManifest(String("[dependencies.a]\nversion = \"1\"\n"));
+    assert subTable.problems.getSize() == 1l;
+    return true;
+}
+
+#[test]
+f<bool> testEditDependencyLines() {
+    const String text = String("# my project\n[package]\nname = \"x\"\n\n[dependencies]\na = \"^1.0.0\" # keep me\nb = \"*\"\n\n# tail\n");
+    // Change in place, keeping the comment
+    const String changed = setDependencyLine(text, String("a"), String("\"^2.0.0\""), false);
+    assert changed == "# my project\n[package]\nname = \"x\"\n\n[dependencies]\na = \"^2.0.0\" # keep me\nb = \"*\"\n\n# tail\n";
+    // Add to an existing section
+    const String added = setDependencyLine(text, String("c"), String("{ path = \"../c\" }"), false);
+    assert added == "# my project\n[package]\nname = \"x\"\n\n[dependencies]\na = \"^1.0.0\" # keep me\nb = \"*\"\nc = { path = \"../c\" }\n\n# tail\n";
+    // Move to a section that does not exist yet
+    const String moved = setDependencyLine(text, String("b"), String("\"*\""), true);
+    assert moved == "# my project\n[package]\nname = \"x\"\n\n[dependencies]\na = \"^1.0.0\" # keep me\n\n# tail\n\n[dev-dependencies]\nb = \"*\"\n";
+    // Add to an empty section
+    const String empty = setDependencyLine(String("[package]\n[dependencies]\n[tool.x]\n"), String("a"), String("\"1\""), false);
+    assert empty == "[package]\n[dependencies]\na = \"1\"\n[tool.x]\n";
+    // Remove
+    const String removed = removeDependencyLine(text, String("a"));
+    assert removed == "# my project\n[package]\nname = \"x\"\n\n[dependencies]\nb = \"*\"\n\n# tail\n";
+    return true;
+}

@@ -1,10 +1,16 @@
+// Std imports
 import "std/data/vector";
+import "std/text/analysis";
+import "std/text/string-ext";
+import "std/type/type-conversion";
+
+// Own imports
 import "./util";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Semantic versions and version constraints (same rules as the Spice Rack registry)
 //
-// Supported constraints, which can be combined with commas or spaces (all of them have to match):
+// Supported clauses, which can be combined with commas or spaces (all of them have to match):
 //   *          any version             1.2.3     exactly 1.2.3 (also =1.2.3)
 //   ^1.2.3     >=1.2.3 <2.0.0          ~1.2.3    >=1.2.3 <1.3.0
 //   1.2.x      same as ~1.2.0          1.x       same as ^1.0.0
@@ -19,29 +25,33 @@ public type Semver struct {
     public bool valid = false
 }
 
+f<long> parseNumber(const String& text) {
+    if text.isEmpty() || text.getLength() > 18l { return -1l; }
+    for unsigned long i = 0l; i < text.getLength(); i++ {
+        if !isDigit(text[i]) { return -1l; }
+    }
+    return toLong(text.getRaw());
+}
+
 /**
  * Parse "1.2.3", "v1.2.3", "1.2", "1.2.3-beta.1" or "1.2.3+build". Build metadata is dropped.
  */
 public f<Semver> parseSemver(const String& input) {
     Semver version;
     String text = input.trim();
-    if text.startsWith("v") || text.startsWith("V") { text = tail(text, 1l); }
+    if text.startsWith("v") || text.startsWith("V") { text = text.getSubstring(1l); }
     const long plus = text.find('+');
     if plus >= 0l { text = text.getSubstring(0l, plus); }
     const long dash = text.find('-');
     if dash >= 0l {
         version.pre = text.getSubstring(cast<unsigned long>(dash) + 1l);
         text = text.getSubstring(0l, dash);
+        if version.pre.isEmpty() { return version; }
     }
     const Vector<String> parts = split(text, '.');
-    if parts.getSize() < 1l || parts.getSize() > 3l { return version; }
+    if parts.getSize() > 3l { return version; }
     for unsigned long i = 0l; i < parts.getSize(); i++ {
-        const String& part = parts.get(i);
-        if part.isEmpty() { return version; }
-        for unsigned long k = 0l; k < part.getLength(); k++ {
-            if part[k] < '0' || part[k] > '9' { return version; }
-        }
-        const long number = parseLong(part, -1l);
+        const long number = parseNumber(parts.get(i));
         if number < 0l { return version; }
         if i == 0l { version.major = number; }
         else if i == 1l { version.minor = number; }
@@ -51,8 +61,22 @@ public f<Semver> parseSemver(const String& input) {
     return version;
 }
 
+/**
+ * A complete version as required for package.version: three numbers, no leading 'v'
+ */
+public f<bool> isStrictSemver(const String& input) {
+    if input.startsWith("v") || input.startsWith("V") || input != input.trim() { return false; }
+    String core = input;
+    const long plus = core.find('+');
+    if plus >= 0l { core = core.getSubstring(0l, plus); }
+    const long dash = core.find('-');
+    if dash >= 0l { core = core.getSubstring(0l, dash); }
+    const Vector<String> parts = split(core, '.');
+    return parts.getSize() == 3l && parseSemver(input).valid;
+}
+
 public f<String> Semver.toString() {
-    String text = fmtLong(this.major) + "." + fmtLong(this.minor) + "." + fmtLong(this.patch);
+    String text = toString(this.major) + "." + toString(this.minor) + "." + toString(this.patch);
     if !this.pre.isEmpty() { text += "-" + this.pre; }
     return text;
 }
@@ -63,8 +87,8 @@ f<int> compareIdentifiers(const String& a, const String& b) {
     const Vector<String> pb = split(b, '.');
     const unsigned long n = pa.getSize() < pb.getSize() ? pa.getSize() : pb.getSize();
     for unsigned long i = 0l; i < n; i++ {
-        const long na = parseLong(pa.get(i), -1l);
-        const long nb = parseLong(pb.get(i), -1l);
+        const long na = parseNumber(pa.get(i));
+        const long nb = parseNumber(pb.get(i));
         if na >= 0l && nb >= 0l {
             if na != nb { return na < nb ? -1 : 1; }
         } else if na >= 0l {
@@ -77,14 +101,6 @@ f<int> compareIdentifiers(const String& a, const String& b) {
     }
     if pa.getSize() == pb.getSize() { return 0; }
     return pa.getSize() < pb.getSize() ? -1 : 1;
-}
-
-public f<bool> isStringBefore(const String& a, const String& b) {
-    const unsigned long n = a.getLength() < b.getLength() ? a.getLength() : b.getLength();
-    for unsigned long i = 0l; i < n; i++ {
-        if a[i] != b[i] { return a[i] < b[i]; }
-    }
-    return a.getLength() < b.getLength();
 }
 
 /**
@@ -101,86 +117,144 @@ public f<int> compareSemver(const Semver& a, const Semver& b) {
 }
 
 /**
- * Check a single comparator like ">=1.2.3", "^1.2", "~2.0.1", "1.2.x" or "*"
+ * A single clause like ">=1.2.3", "^1.2", "~2.0.1", "1.2.x" or "*", turned into a range [lower, upper).
+ * A missing upper bound is marked by upper.valid == false.
  */
-f<bool> satisfiesClause(const Semver& version, const String& clause) {
-    String text = clause.trim();
-    if text.isEmpty() || text == "*" || text == "x" || text == "latest" { return true; }
+type Clause struct {
+    public bool valid = false
+    public bool any = false
+    public String op       // "", "=", ">=", ">", "<=", "<"; ranges (^, ~, wildcards) are turned into lower/upper
+    public Semver lower
+    public Semver upper
+}
 
+f<Clause> parseClause(const String& input) {
+    Clause clause;
+    String text = input.trim();
+    if text.isEmpty() || text == "*" || text == "x" || text == "X" {
+        clause.valid = true;
+        clause.any = true;
+        return clause;
+    }
     if text.startsWith(">=") || text.startsWith("<=") {
-        const Semver bound = parseSemver(tail(text, 2l));
-        if !bound.valid { return false; }
-        const int cmp = compareSemver(version, bound);
-        return text.startsWith(">=") ? cmp >= 0 : cmp <= 0;
+        clause.op = text.getSubstring(0l, 2l);
+        clause.lower = parseSemver(text.getSubstring(2l));
+        clause.valid = clause.lower.valid;
+        return clause;
     }
-    if text.startsWith(">") || text.startsWith("<") {
-        const Semver bound = parseSemver(tail(text, 1l));
-        if !bound.valid { return false; }
-        const int cmp = compareSemver(version, bound);
-        return text.startsWith(">") ? cmp > 0 : cmp < 0;
+    if text.startsWith(">") || text.startsWith("<") || text.startsWith("=") {
+        clause.op = text.getSubstring(0l, 1l);
+        text = text.getSubstring(1l);
+        if clause.op != "=" {
+            clause.lower = parseSemver(text);
+            clause.valid = clause.lower.valid;
+            return clause;
+        }
+        clause.op = String("");
     }
-    if text.startsWith("=") { text = tail(text, 1l); }
 
     const bool caret = text.startsWith("^");
     const bool tilde = text.startsWith("~");
-    if caret || tilde { text = tail(text, 1l); }
+    if caret || tilde { text = text.getSubstring(1l); }
 
     // Wildcards: "1.x", "1.2.*"
     bool wildcard = false;
     const Vector<String> pieces = split(text, '.');
     String concrete;
+    unsigned long given = 0l;
     for unsigned long i = 0l; i < pieces.getSize(); i++ {
         const String& piece = pieces.get(i);
-        if piece == "x" || piece == "X" || piece == "*" { wildcard = true; break; }
+        if piece == "x" || piece == "X" || piece == "*" {
+            // Everything after a wildcard has to be a wildcard as well
+            for unsigned long k = i; k < pieces.getSize(); k++ {
+                const String& rest = pieces.get(k);
+                if rest != "x" && rest != "X" && rest != "*" { return clause; }
+            }
+            wildcard = true;
+            break;
+        }
         if i > 0l { concrete += "."; }
         concrete += piece;
+        given++;
     }
-    const Semver base = parseSemver(concrete);
-    if !base.valid { return false; }
-    const Vector<String> concreteParts = split(concrete, '.');
-    const unsigned long given = wildcard ? concreteParts.getSize() : pieces.getSize();
+    if wildcard && (caret || tilde || given == 0l) { return clause; }
+    clause.lower = parseSemver(concrete);
+    if !clause.lower.valid { return clause; }
+    clause.valid = true;
 
-    if !caret && !tilde && !wildcard { return compareSemver(version, base) == 0; }
-
-    Semver upper;
-    upper.valid = true;
-    if wildcard {
-        if given == 0l { return true; }
-        if given == 1l { upper.major = base.major + 1l; } else { upper.major = base.major; upper.minor = base.minor + 1l; }
-    } else if tilde {
-        if given == 1l { upper.major = base.major + 1l; } else { upper.major = base.major; upper.minor = base.minor + 1l; }
+    if !caret && !tilde && !wildcard {
+        clause.op = String("=");
+        return clause;
+    }
+    clause.upper.valid = true;
+    if wildcard || tilde {
+        if given == 1l { clause.upper.major = clause.lower.major + 1l; }
+        else { clause.upper.major = clause.lower.major; clause.upper.minor = clause.lower.minor + 1l; }
     } else {
         // Caret: everything up to the next change of the left-most non-zero number
-        if base.major > 0l || given == 1l { upper.major = base.major + 1l; }
-        else if base.minor > 0l || given == 2l { upper.major = 0l; upper.minor = base.minor + 1l; }
-        else { upper.major = 0l; upper.minor = 0l; upper.patch = base.patch + 1l; }
+        if clause.lower.major > 0l || given == 1l { clause.upper.major = clause.lower.major + 1l; }
+        else if clause.lower.minor > 0l || given == 2l { clause.upper.minor = clause.lower.minor + 1l; }
+        else { clause.upper.patch = clause.lower.patch + 1l; }
     }
-    return compareSemver(version, base) >= 0 && compareSemver(version, upper) < 0;
+    return clause;
+}
+
+f<bool> Clause.matches(const Semver& version) {
+    if this.any { return true; }
+    const int cmp = compareSemver(version, this.lower);
+    if this.op == "=" { return cmp == 0; }
+    if this.op == ">=" { return cmp >= 0; }
+    if this.op == ">" { return cmp > 0; }
+    if this.op == "<=" { return cmp <= 0; }
+    if this.op == "<" { return cmp < 0; }
+    return cmp >= 0 && (!this.upper.valid || compareSemver(version, this.upper) < 0);
 }
 
 /**
- * Check a version against a constraint expression (clauses separated by commas and/or spaces)
+ * Split a constraint expression into clauses. Operators written with a space (">= 1.2") are joined with their version.
  */
-public f<bool> satisfies(const Semver& version, const String& constraint) {
-    String normalized;
-    // Join "op version" pairs written with a space, e.g. ">= 1.2"
-    const unsigned long len = constraint.getLength();
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = constraint[i];
-        if c == ',' { normalized.append(' '); }
-        else { normalized.append(c); }
-    }
+f<Vector<String>> splitClauses(const String& constraint) {
+    String normalized = constraint;
+    normalized.replaceAll(',', ' ');
     const Vector<String> tokens = split(normalized, ' ');
+    Vector<String> clauses;
     String pendingOperator;
     for unsigned long i = 0l; i < tokens.getSize(); i++ {
         const String& token = tokens.get(i);
         if token.isEmpty() { continue; }
-        const bool operatorOnly = (token == ">=" || token == "<=" || token == ">" || token == "<" || token == "=" ||
-                                   token == "^" || token == "~");
+        const bool operatorOnly = token == ">=" || token == "<=" || token == ">" || token == "<" || token == "=" ||
+                                  token == "^" || token == "~";
         if operatorOnly { pendingOperator = token; continue; }
-        const String full = pendingOperator + token;
+        clauses.pushBack(pendingOperator + token);
         pendingOperator = String("");
-        if !satisfiesClause(version, full) { return false; }
+    }
+    if !pendingOperator.isEmpty() { clauses.pushBack(pendingOperator); }
+    return clauses;
+}
+
+/**
+ * Check whether a text is a valid constraint expression
+ */
+public f<bool> isValidConstraint(const String& constraint) {
+    const String trimmed = constraint.trim();
+    if trimmed.isEmpty() { return false; }
+    const Vector<String> clauses = splitClauses(constraint);
+    for unsigned long i = 0l; i < clauses.getSize(); i++ {
+        const Clause clause = parseClause(clauses.get(i));
+        if !clause.valid { return false; }
+    }
+    return true;
+}
+
+/**
+ * Check a version against a constraint expression. Invalid constraints match nothing.
+ */
+public f<bool> satisfies(const Semver& version, const String& constraint) {
+    if !version.valid { return false; }
+    const Vector<String> clauses = splitClauses(constraint);
+    for unsigned long i = 0l; i < clauses.getSize(); i++ {
+        const Clause clause = parseClause(clauses.get(i));
+        if !clause.valid || !clause.matches(version) { return false; }
     }
     return true;
 }
@@ -194,20 +268,16 @@ public f<long> pickBestVersion(const Vector<String>& versions, const String& con
     long bestPre = -1l;
     for unsigned long i = 0l; i < versions.getSize(); i++ {
         const Semver candidate = parseSemver(versions.get(i));
-        if !candidate.valid || !satisfies(candidate, constraint) { continue; }
-        if candidate.pre.isEmpty() {
-            if best < 0l { best = cast<long>(i); }
-            else {
-                const Semver current = parseSemver(versions.get(cast<unsigned long>(best)));
-                if compareSemver(candidate, current) > 0 { best = cast<long>(i); }
-            }
-        } else {
-            if bestPre < 0l { bestPre = cast<long>(i); }
-            else {
-                const Semver current = parseSemver(versions.get(cast<unsigned long>(bestPre)));
-                if compareSemver(candidate, current) > 0 { bestPre = cast<long>(i); }
-            }
+        if !satisfies(candidate, constraint) { continue; }
+        const bool stable = candidate.pre.isEmpty();
+        const long current = stable ? best : bestPre;
+        bool better = current < 0l;
+        if !better {
+            const Semver currentVersion = parseSemver(versions.get(cast<unsigned long>(current)));
+            better = compareSemver(candidate, currentVersion) > 0;
         }
+        if better && stable { best = cast<long>(i); }
+        if better && !stable { bestPre = cast<long>(i); }
     }
     return best >= 0l ? best : bestPre;
 }
@@ -221,6 +291,11 @@ f<bool> testSemverParse() {
     assert !parseSemver(String("1.x")).valid;
     assert !parseSemver(String("abc")).valid;
     assert !parseSemver(String("1.2.3.4")).valid;
+    assert !parseSemver(String("1..2")).valid;
+    assert isStrictSemver(String("1.2.3"));
+    assert isStrictSemver(String("1.2.3-rc.1"));
+    assert !isStrictSemver(String("v1.2.3"));
+    assert !isStrictSemver(String("1.2"));
     return true;
 }
 
@@ -239,8 +314,10 @@ f<bool> testSemverConstraints() {
     const Semver v = parseSemver(String("1.4.2"));
     assert satisfies(v, String("*"));
     assert satisfies(v, String("1.4.2"));
+    assert satisfies(v, String("=1.4.2"));
     assert !satisfies(v, String("1.4.3"));
     assert satisfies(v, String("^1.2.0"));
+    assert satisfies(v, String("^1"));
     assert !satisfies(v, String("^2.0.0"));
     assert satisfies(v, String("~1.4.0"));
     assert !satisfies(v, String("~1.3.0"));
@@ -252,6 +329,17 @@ f<bool> testSemverConstraints() {
     assert !satisfies(v, String(">1.4.2"));
     assert satisfies(parseSemver(String("0.2.5")), String("^0.2.1"));
     assert !satisfies(parseSemver(String("0.3.0")), String("^0.2.1"));
+    assert satisfies(parseSemver(String("0.0.3")), String("^0.0.3"));
+    assert !satisfies(parseSemver(String("0.0.4")), String("^0.0.3"));
+    assert isValidConstraint(String("^1.2.0"));
+    assert isValidConstraint(String(">=1.0.0, <2.0.0"));
+    assert isValidConstraint(String("1.2.x"));
+    assert isValidConstraint(String("*"));
+    assert !isValidConstraint(String(""));
+    assert !isValidConstraint(String("^1.x"));
+    assert !isValidConstraint(String("1.x.3"));
+    assert !isValidConstraint(String("latest"));
+    assert !isValidConstraint(String(">="));
     return true;
 }
 
@@ -265,5 +353,6 @@ f<bool> testPickBest() {
     assert pickBestVersion(versions, String("^1.0.0")) == 1l;
     assert pickBestVersion(versions, String("*")) == 2l;
     assert pickBestVersion(versions, String("^3.0.0")) == -1l;
+    assert pickBestVersion(versions, String(">=1.9.0-rc.0, <2.0.0")) == 3l;
     return true;
 }

@@ -1,0 +1,192 @@
+// Std imports
+import "std/crypto/sha256";
+import "std/data/vector";
+import "std/io/dir";
+import "std/net/http" as http;
+import "std/net/http-client";
+import "std/os/cmd";
+import "std/os/filesystem";
+import "std/os/process";
+import "std/text/string-ext";
+import "std/type/type-conversion";
+
+// Own imports
+import "./util";
+import "./registry";
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Downloading package archives, unpacking them and computing their content checksum
+// ---------------------------------------------------------------------------------------------------------------------
+
+public const string CHECKSUM_PREFIX = "sha256-tree:";
+const unsigned long MAX_ARCHIVE_SIZE = 268435456l; // 256 MiB
+
+/**
+ * Download a URL to a file. Redirects are followed.
+ */
+public f<bool> downloadFile(const String& url, const String& destination, String& error) {
+    HttpClient client;
+    client.maxMessageSize = MAX_ARCHIVE_SIZE;
+    client.timeoutMillis = 120000l;
+    client.setDefaultHeader(http::HEADER_USER_AGENT, USER_AGENT);
+    Result<http::HttpResponse> response = client.get(url.getRaw());
+    if response.isErr() {
+        const Error& requestError = response.getErr();
+        error = String("Could not download ") + url + " (" + requestError.getMessage() + ")";
+        return false;
+    }
+    const http::HttpResponse& answer = response.unwrap();
+    if answer.statusCode != http::STATUS_OK {
+        error = String("Could not download ") + url + " (HTTP status " + toString(cast<int>(answer.statusCode)) + ")";
+        return false;
+    }
+    if !writeBinaryFile(destination, answer.body) {
+        error = String("Could not write ") + destination;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Path of a temporary file for the archive of a package
+ */
+public f<String> tempArchivePath(const String& name) {
+    return String(getTempDir()) + "/spice-shaker-" + toString(getPID()) + "-" + name + ".tar.gz";
+}
+
+/**
+ * Unpack a .tar.gz archive into an empty directory, dropping the single top-level folder that GitHub archives have
+ */
+public f<bool> unpackArchive(const String& archive, const String& target, String& error) {
+    removeTree(target);
+    if mkDirs(target.getRaw(), MODE_ALL_RWX) != 0 {
+        error = String("Could not create ") + target;
+        return false;
+    }
+    Vector<String> args;
+    args.pushBack(String("-xzf"));
+    args.pushBack(archive);
+    args.pushBack(String("-C"));
+    args.pushBack(target);
+    args.pushBack(String("--strip-components=1"));
+    if !runTool("tar", args) {
+        removeTree(target);
+        error = String("Could not unpack ") + archive + ". Is 'tar' installed?";
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Paths of the regular files in an archive, relative to its top-level folder and sorted byte-wise.
+ * Directories, links and paths with '..' are left out.
+ */
+public f<bool> listArchiveFiles(const String& archive, Vector<String>& files, String& error) {
+    // The plain listing has the names, the verbose listing the entry types (first character of the mode), line by line
+    Vector<String> args;
+    args.pushBack(String("-tzf"));
+    args.pushBack(archive);
+    Result<ProcessResult> names = runProcessCaptured(String("tar"), args);
+    args[0l] = String("-tvzf");
+    Result<ProcessResult> details = runProcessCaptured(String("tar"), args);
+    if names.isErr() || details.isErr() {
+        error = String("Could not run 'tar'");
+        return false;
+    }
+    const ProcessResult& nameResult = names.unwrap();
+    const ProcessResult& detailResult = details.unwrap();
+    const Vector<String> nameLines = splitLines(nameResult.output);
+    const Vector<String> detailLines = splitLines(detailResult.output);
+    if nameResult.exitCode != 0 || detailResult.exitCode != 0 || nameLines.getSize() != detailLines.getSize() {
+        error = String("Could not list the files of ") + archive;
+        return false;
+    }
+    for unsigned long i = 0l; i < nameLines.getSize(); i++ {
+        const String& detail = detailLines.get(i);
+        if detail.isEmpty() || detail[0l] != '-' { continue; }
+        const String& name = nameLines.get(i);
+        const long slash = name.find('/');
+        if slash < 0l { continue; }
+        const String relative = name.getSubstring(cast<unsigned long>(slash) + 1l);
+        if relative.isEmpty() || relative.startsWith("/") || relative.endsWith("/") { continue; }
+        bool safe = true;
+        const Vector<String> parts = split(relative, '/');
+        for unsigned long k = 0l; k < parts.getSize(); k++ {
+            if parts.get(k) == ".." { safe = false; }
+        }
+        if safe { files.pushBack(relative); }
+    }
+    sortStrings(files);
+    return true;
+}
+
+/**
+ * Checksum of a file tree as defined in the spec: sha256 over the lines "<sha256 of the file>  <path>\n" of all files
+ */
+public f<bool> treeChecksum(const String& root, const Vector<String>& files, String& checksum, String& error) {
+    Sha256 tree;
+    for unsigned long i = 0l; i < files.getSize(); i++ {
+        const String& relative = files.get(i);
+        Result<String> content = readBinaryFile(root + "/" + relative);
+        if content.isErr() {
+            error = String("Could not read ") + root + "/" + relative;
+            return false;
+        }
+        tree.update(sha256(content.unwrap()) + "  " + relative + "\n");
+    }
+    checksum = String(CHECKSUM_PREFIX) + tree.finalize();
+    return true;
+}
+
+/**
+ * Download an archive, unpack it into `target` and compute its checksum. If `expectedChecksum` is not empty, the
+ * checksum has to match it; otherwise the package is removed again.
+ */
+public f<bool> fetchPackage(const String& url, const String& name, const String& target, const String& expectedChecksum,
+                            String& checksum, String& error) {
+    const String archive = tempArchivePath(name);
+    bool ok = downloadFile(url, archive, error);
+    Vector<String> files;
+    ok = ok && listArchiveFiles(archive, files, error);
+    ok = ok && unpackArchive(archive, target, error);
+    removeFile(archive);
+    ok = ok && treeChecksum(target, files, checksum, error);
+    if ok && !expectedChecksum.isEmpty() && checksum != expectedChecksum {
+        error = String("The checksum of ") + name + " does not match " + "the lock file. The package changed since it was " +
+                "locked, which can mean that it was tampered with. Run 'spice-shaker update' to accept the new content.";
+        ok = false;
+    }
+    if !ok { removeTree(target); }
+    return ok;
+}
+
+#[test]
+f<bool> testTreeChecksum() {
+    // Build a tiny archive with tar and check the listing and checksum against values computed by hand
+    const String base = String(getTempDir()) + "/spice-shaker-test-" + toString(getPID());
+    removeTree(base);
+    const String srcDir = base + "/pkg-1.0/src";
+    assert mkDirs(srcDir.getRaw(), MODE_ALL_RWX) == 0;
+    assert writeBinaryFile(base + "/pkg-1.0/src/main.spice", String("f<int> main() {}\n"));
+    assert writeBinaryFile(base + "/pkg-1.0/README.md", String("# pkg\r\n"));
+    Vector<String> args;
+    args.pushBack(String("-czf"));
+    args.pushBack(base + "/pkg.tar.gz");
+    args.pushBack(String("-C"));
+    args.pushBack(base);
+    args.pushBack(String("pkg-1.0"));
+    assert runTool("tar", args);
+
+    Vector<String> files;
+    String error;
+    assert listArchiveFiles(base + "/pkg.tar.gz", files, error);
+    assert files.getSize() == 2l;
+    assert files.get(0l) == "README.md" && files.get(1l) == "src/main.spice";
+    assert unpackArchive(base + "/pkg.tar.gz", base + "/out", error);
+    String checksum;
+    assert treeChecksum(base + "/out", files, checksum, error);
+    const String expectedList = sha256(String("# pkg\r\n")) + "  README.md\n" + sha256(String("f<int> main() {}\n")) + "  src/main.spice\n";
+    assert checksum == String(CHECKSUM_PREFIX) + sha256(expectedList);
+    removeTree(base);
+    return true;
+}
