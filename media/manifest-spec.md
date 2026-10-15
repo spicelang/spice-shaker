@@ -252,7 +252,7 @@ repository with several packages, each in its own directory such as `packages/gi
 unpacked, as the root of `spice_packages/<name>`.
 
 **GitHub dependencies.** Shaker resolves `rev` (or `HEAD` for the default branch) to a commit sha with the GitHub REST API
-(`GET /repos/{owner}/{repo}/commits/{ref}`). If the `GITHUB_TOKEN` environment variable is set, it is sent as a bearer token. In `sync`,
+(`GET /repos/{owner}/{repo}/commits/{ref}`). If the `GITHUB_TOKEN` (or else `GH_TOKEN`) environment variable is set, it is sent as a bearer token. In `sync`,
 a locked commit is reused as long as the lock entry has the same source and ref. The archive of the commit is downloaded from
 `https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}`.
 

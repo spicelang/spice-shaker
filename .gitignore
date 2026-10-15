@@ -1,2 +1,5 @@
 # Build output
 /build
+
+# Dependencies
+/src/spice_packages/

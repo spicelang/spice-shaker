@@ -336,7 +336,7 @@ public f<int> runList() {
 
 public f<int> runSearch(const String& query, long page) {
     Registry registry;
-    SearchResult found;
+    RegistrySearchResult found;
     const Reply reply = registry.search(query, page, found);
     if !reply.ok() {
         println(String("error: ") + reply.error);

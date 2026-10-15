@@ -8,6 +8,9 @@ import "std/text/json/json-value";
 import "std/text/json/json-parser";
 import "std/type/type-conversion";
 
+// Package imports
+import "spice_packages/github/github" as gh;
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Clients for the JSON API of the Spice Rack package registry and the GitHub REST API
 // ---------------------------------------------------------------------------------------------------------------------
@@ -15,7 +18,6 @@ import "std/type/type-conversion";
 public const string DEFAULT_REGISTRY_URL = "https://rack.spicelang.com";
 public const string REGISTRY_URL_ENV = "SPICE_RACK_URL";
 public const string USER_AGENT = "spice-shaker";
-const string GITHUB_API_URL = "https://api.github.com";
 const string GITHUB_TOKEN_ENV = "GITHUB_TOKEN";
 const string CODELOAD_URL = "https://codeload.github.com";
 
@@ -56,7 +58,7 @@ public type PackageDetails struct {
     public Vector<PackageVersion> versions // Newest first
 }
 
-public type SearchResult struct {
+public type RegistrySearchResult struct {
     public Vector<PackageSummary> packages
     public long total = 0l
     public long page = 0l
@@ -130,7 +132,7 @@ f<bool> decodePackageDetails(JsonValue* doc, PackageDetails& details) {
     return true;
 }
 
-f<bool> decodeSearchResult(JsonValue* doc, SearchResult& searchResult) {
+f<bool> decodeSearchResult(JsonValue* doc, RegistrySearchResult& searchResult) {
     if !readLong(doc, "total", searchResult.total) || !readLong(doc, "page", searchResult.page) || !doc.hasField("packages") { return false; }
     JsonValue* packages = doc.getField("packages");
     if !packages.isArray() { return false; }
@@ -206,7 +208,7 @@ public f<Reply> Registry.getPackage(const String& name, PackageDetails& details)
     return reply;
 }
 
-public f<Reply> Registry.search(const String& query, long page, SearchResult& searchResult) {
+public f<Reply> Registry.search(const String& query, long page, RegistrySearchResult& searchResult) {
     JsonValue* doc = nil<JsonValue*>;
     Reply reply = this.getJson(String("/api/v1/packages?q=") + urlEncode(query) + "&page=" + toString(page), doc);
     if !reply.ok() { return reply; }
@@ -226,43 +228,38 @@ public f<String> Registry.downloadUrl(const String& name, const String& version)
  * Resolve a git ref (branch, tag, sha or HEAD) of a GitHub repository to the full sha of its commit
  */
 public f<bool> resolveGithubCommit(const String& repo, const String& ref, String& commit, String& error) {
-    HttpClient client;
-    client.setDefaultHeader(HEADER_ACCEPT, "application/vnd.github.sha");
-    client.setDefaultHeader(HEADER_USER_AGENT, USER_AGENT);
-    client.setDefaultHeader("X-GitHub-Api-Version", "2022-11-28");
-    Result<string> token = getEnv(GITHUB_TOKEN_ENV);
-    if token.isOk() {
-        const String bearer = String("Bearer ") + token.unwrap();
-        client.setDefaultHeader(HEADER_AUTHORIZATION, bearer.getRaw());
-    }
-    // Repository names and refs are validated to contain only URL-safe characters
-    const String url = String(GITHUB_API_URL) + "/repos/" + repo + "/commits/" + ref;
-    Result<HttpResponse> response = client.get(url.getRaw());
-    if response.isErr() {
-        const Error& requestError = response.getErr();
-        error = String("Could not reach GitHub (") + requestError.getMessage() + ")";
-        return false;
-    }
-    const HttpResponse& answer = response.unwrap();
-    if answer.statusCode == STATUS_NOT_FOUND || answer.statusCode == 422s {
+    gh::GitHubClient client;
+    client.setUserAgent(USER_AGENT);
+    const bool _ = client.loadTokenFromEnv(); // GITHUB_TOKEN or GH_TOKEN, optional
+    // Repository names are validated to be owner/repo
+    const long slash = repo.find('/');
+    const String owner = repo.getSubstring(0l, slash);
+    const String name = repo.getSubstring(cast<unsigned long>(slash) + 1l);
+    Result<gh::Commit> found = client.getCommit(owner.getRaw(), name.getRaw(), ref.getRaw());
+    const unsigned short status = client.lastError.status;
+    if status == STATUS_NOT_FOUND || status == 422s {
         error = String("GitHub repository ") + repo + " has no ref '" + ref + "'";
         return false;
     }
-    if answer.statusCode == STATUS_FORBIDDEN || answer.statusCode == STATUS_TOO_MANY_REQUESTS {
+    if status == STATUS_FORBIDDEN || status == STATUS_TOO_MANY_REQUESTS {
         error = String("GitHub refused the request, probably because of its rate limit. Set ") + GITHUB_TOKEN_ENV +
                 " to a GitHub token to raise the limit.";
         return false;
     }
-    commit = answer.body.trim();
-    bool valid = answer.statusCode == STATUS_OK && commit.getLength() == 40l;
+    if found.isErr() {
+        const String reason = client.lastError.describe();
+        error = status == 0s ? String("Could not reach GitHub (") + reason + ")"
+                             : String("GitHub sent an unexpected answer for ") + repo + "@" + ref + " (" + reason + ")";
+        return false;
+    }
+    const gh::Commit& resolved = found.unwrap();
+    commit = resolved.sha;
+    bool valid = commit.getLength() == 40l;
     for unsigned long i = 0l; i < commit.getLength() && valid; i++ {
         const char c = commit[i];
         valid = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     }
-    if !valid {
-        error = String("GitHub sent an unexpected answer for ") + repo + "@" + ref + " (HTTP status " +
-                toString(cast<int>(answer.statusCode)) + ")";
-    }
+    if !valid { error = String("GitHub sent an unexpected answer for ") + repo + "@" + ref; }
     return valid;
 }
 
@@ -292,7 +289,7 @@ f<bool> testDecodeRegistryAnswers() {
                                                 "\"description\": \"\", \"repository\": \"r\", \"path\": \"packages/github\", \"homepage\": \"\", " +
                                                 "\"license\": \"\", \"maintainer\": \"m\", \"tags\": [], \"latestVersion\": \"0.1.0\", \"downloads\": 0}]}");
     JsonValue* nestedDoc = nestedParsed.unwrap();
-    SearchResult nested;
+    RegistrySearchResult nested;
     assert decodeSearchResult(nestedDoc, nested);
     deleteJsonValue(nestedDoc);
     assert nested.packages.getSize() == 1l && nested.packages.get(0l).path == "packages/github";
@@ -300,7 +297,7 @@ f<bool> testDecodeRegistryAnswers() {
     // Unexpected kinds are rejected instead of panicking
     Result<JsonValue*> wrongKinds = parseJson(String("{\"total\": \"1\", \"page\": 1, \"packages\": {}}"));
     JsonValue* wrongDoc = wrongKinds.unwrap();
-    SearchResult searchResult;
+    RegistrySearchResult searchResult;
     assert !decodeSearchResult(wrongDoc, searchResult);
     deleteJsonValue(wrongDoc);
     Result<JsonValue*> notAnObject = parseJson(String("[1]"));

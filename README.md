@@ -18,7 +18,7 @@ If you like Spice Shaker, please consider a GitHub star! ⭐
 
 ## Usage
 Spice Shaker talks to the [Spice Rack](https://github.com/spicelang/spice-rack) package registry (`https://rack.spicelang.com`; override with the
-`SPICE_RACK_URL` environment variable) and to GitHub (set `GITHUB_TOKEN` to raise the API rate limit). It needs `tar` on the path.
+`SPICE_RACK_URL` environment variable) and to GitHub (set `GITHUB_TOKEN` or `GH_TOKEN` to raise the API rate limit). It needs `tar` on the path.
 
 ```bash
 spice-shaker init                          # create spice.toml and ignore spice_packages/ in .gitignore
@@ -56,8 +56,13 @@ constraints follow the registry: `1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0,
 [media/manifest-spec.md](./media/manifest-spec.md).
 
 ## Development
+Spice Shaker is a Spice package itself. Its manifest lives in `src/` (imports cannot leave the directory of the importing file,
+so the packages have to be installed below `src/`), and it uses the [github](https://github.com/spicelang/packages/tree/main/packages/github)
+package to talk to the GitHub API.
+
 ```bash
-./build.sh                           # builds build/spice-shaker
+python3 bootstrap.py                 # install the dependencies from src/spice.lock to src/spice_packages without Spice Shaker
+python3 build.py                     # runs bootstrap.py and builds build/spice-shaker (.exe on Windows)
 spice test src/tests.spice           # unit tests
 ```
 
