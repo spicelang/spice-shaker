@@ -1,12 +1,12 @@
 <p align="center">
-  <img alt="Spice Logo" src="https://github.com/spicelang/spice/raw/main/docs/docs/static/avatar.png" height="220" />
+  <img alt="Spice Logo" src="https://github.com/spicelang/spice/raw/main/docs/docs/static/logo_large_white_background_blur.png" height="230" />
   <h3 align="center">Spice Shaker</h3>
-  <p align="center">Official Package Manager for the Spice programming language.</p>
+  <p align="center">Official package manager for the Spice programming language.</p>
   <p align="center">
-    <a target="_blank" href="https://github.com/spicelang/spice-shaker/releases/latest"><img src="https://img.shields.io/github/v/release/spicelang/spice-shaker?include_prereleases"></a>
-    <a target="_blank" href="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml"><img src="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml/badge.svg"></a>
-    <a target="_blank" href="https://makeapullrequest.com"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg"></a>
-    <a target="_blank" href="./LICENSE.md"><img src="https://img.shields.io/github/license/spicelang/spice-shaker"></a>
+    <a target="_blank" href="https://github.com/spicelang/spice-shaker/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/spicelang/spice-shaker?include_prereleases"></a>
+    <a target="_blank" href="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/spicelang/spice-shaker/actions/workflows/ci.yml/badge.svg"></a>
+    <a target="_blank" href="./LICENSE"><img alt="License" src="https://img.shields.io/github/license/spicelang/spice-shaker"></a>
+    <a target="_blank" href="https://discord.gg/D6sCsJyWPg"><img alt="Discord server" src="https://dcbadge.limes.pink/api/server/D6sCsJyWPg?style=flat"></a>
   </p>
 </p>
 
