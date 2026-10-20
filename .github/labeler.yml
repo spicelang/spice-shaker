@@ -1,0 +1,31 @@
+'package-manager':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/**/*'
+          - 'bootstrap.py'
+          - 'build.py'
+
+'tests':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/tests.spice'
+          - 'media/test-project/**/*'
+
+'documentation':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'media/manifest-spec.md'
+          - 'CONTRIBUTING.md'
+          - 'README.md'
+          - 'SECURITY.md'
+
+'ci':
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**/*'
+
+'dependencies':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/spice.toml'
+          - 'src/spice.lock'
