@@ -11,7 +11,7 @@ self-install. Reproduce the same sequence before pushing.
 ## Prerequisites
 
 - The Spice compiler on the `PATH` as `spice` (`build.py` calls `spice` directly), with its std (`SPICE_STD_DIR` for
-  a release archive). `src/spice.toml` requires `spice >= 0.29.0`.
+  a release archive). `src/spice.toml` requires `spice >= 0.29.2`.
 - `clang` and `lld` (CI installs them), `tar`, Python 3.11+ (`tomllib`), and network access to
   `rack.spicelang.com` and GitHub for the dependencies.
 
