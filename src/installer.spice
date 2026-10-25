@@ -115,8 +115,7 @@ f<bool> Installer.queueDependencies(const String& name, DependencySource kind, c
                 this.getCompilerVersion());
         return false;
     }
-    if this.entries.contains(name) { this.entries.remove(name); }
-    this.entries.insert(name, manifest.getEntry());
+    this.entries.upsert(name, manifest.getEntry());
     for unsigned long i = 0l; i < manifest.dependencies.getSize(); i++ {
         const Dependency& dep = manifest.dependencies.get(i);
         if dep.dev { continue; }
@@ -349,7 +348,7 @@ public f<bool> Installer.resolve(const Manifest& root) {
             if !this.checkAgainstResolved(requirement) { return false; }
             continue;
         }
-        this.resolved.insert(dep.name, dep);
+        this.resolved.upsert(dep.name, dep);
         bool ok = false;
         if dep.source == DependencySource::GITHUB { ok = this.installGithub(dep, queue); }
         else if dep.source == DependencySource::PATH { ok = this.installPath(dep, queue); }

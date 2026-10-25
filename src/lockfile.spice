@@ -58,8 +58,7 @@ public f<LockEntry> Lockfile.get(const String& name) {
 }
 
 public p Lockfile.set(const LockEntry& entry) {
-    if this.entries.contains(entry.name) { this.entries.remove(entry.name); }
-    this.entries.insert(entry.name, entry);
+    this.entries.upsert(entry.name, entry);
 }
 
 public p Lockfile.drop(const String& name) {
