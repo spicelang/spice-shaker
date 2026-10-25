@@ -115,7 +115,7 @@ f<bool> decodeVersion(JsonValue* object, PackageVersion& version) {
     for unsigned long i = 0l; i < dependencies.getObjectSize(); i++ {
         JsonValue* constraint = dependencies.getObjectValue(i);
         if !constraint.isString() { return false; }
-        version.dependencies.insert(dependencies.getObjectKey(i), constraint.getString());
+        version.dependencies.upsert(dependencies.getObjectKey(i), constraint.getString());
     }
     return true;
 }
