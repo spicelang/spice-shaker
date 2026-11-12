@@ -1,14 +1,14 @@
 ---
 name: spice-shaker-architecture
-description: Orientation map of Spice Shaker, the Spice package manager — the module layout of `src/` (driver → commands → installer → registry/archive, manifest/lockfile/semver models), how `install`/`sync`/`update` resolve and install packages, the format spec in `media/manifest-spec.md`, and the contracts with the Spice Rack registry and the `github` package. Use when navigating the code, deciding where a change belongs, or changing the manifest/lock format or resolution rules.
+description: Orientation map of Spice Shaker, the Spice package manager — the module layout of `src/` (driver → commands → installer → registry/archive, manifest/lockfile models, version constraints from the `semver` package), how `install`/`sync`/`update` resolve and install packages, the format spec in `media/manifest-spec.md`, and the contracts with the Spice Rack registry and the `github` and `semver` packages. Use when navigating the code, deciding where a change belongs, or changing the manifest/lock format or resolution rules.
 ---
 
 # Spice Shaker architecture
 
 Spice Shaker is written in Spice and is itself a Spice package: its manifest is `src/spice.toml`, its lock file
 `src/spice.lock`, and its dependencies (the [github](https://github.com/spicelang/packages/tree/main/packages/github)
-package) are installed to `src/spice_packages/` (imports cannot leave the directory of the importing file, so the
-packages live below `src/`).
+and [semver](https://github.com/spicelang/packages/tree/main/packages/semver) packages) are installed to
+`src/spice_packages/` (imports cannot leave the directory of the importing file, so the packages live below `src/`).
 
 **`media/manifest-spec.md` is the specification** of `spice.toml`, `spice.lock`, checksums, resolution, how Shaker edits
 manifests, validation, and the commands. Behavior changes go into the spec in the same PR.
@@ -26,7 +26,6 @@ manifests, validation, and the commands. Behavior changes go into the spec in th
 | `manifest.spice` | `Manifest` / `Dependency` model, parsing with the std TOML parser, validation, rendering |
 | `manifest-layout.spice` | Line scanner that edits dependency lines in place, so comments and formatting of `spice.toml` survive |
 | `lockfile.spice` | `Lockfile` / `LockEntry`: parse, serialize (`TomlSerializer`), load/save `spice.lock` |
-| `semver.spice` | Versions and constraints (`^`, `~`, `1.2.x`, ranges, `*`), `pickBestVersion` |
 | `util.spice` | Name rules (`isValidPackageName`, GitHub names, refs, package dirs), string helpers, edit distance for suggestions |
 | `tests.spice` | Imports every module so `spice test src/tests.spice` runs all `#[test]` functions |
 
@@ -52,10 +51,15 @@ commit via the GitHub API, archive from `codeload.github.com`; path packages: sy
 ## Cross-repo contracts
 
 - **Spice Rack** ([spicelang/spice-rack](https://github.com/spicelang/spice-rack)) serves the JSON API and reads
-  `spice.toml` itself (`parseManifestDependencies` in its `src/github.spice`). Its semver rules match
-  `src/semver.spice`. A change to the manifest format or constraint syntax has to be mirrored there.
+  `spice.toml` itself (`parseManifestDependencies` in its `src/github.spice`). A change to the manifest format has to
+  be mirrored there.
+- **`semver` package** ([spicelang/packages](https://github.com/spicelang/packages)): versions and constraints (`^`,
+  `~`, `1.2.x`, ranges, `*`) and `pickBestVersion`, imported as `spice_packages/semver/semver`. It implements the
+  constraint syntax of `media/manifest-spec.md`; a change to that syntax is made in the package, released, and then
+  bumped here.
 - **`bootstrap.py`** reimplements `sync` in Python for the packages in `src/spice.lock` (registry + GitHub sources,
   subdirectories, the `sha256-tree:` checksum). Keep it in sync with `archive.spice` when the archive layout or
   checksum definition changes.
-- **`github` package** ([spicelang/packages](https://github.com/spicelang/packages)): bump it in `src/spice.toml`, then
-  regenerate `src/spice.lock` with a built Shaker (`cd src && ../build/spice-shaker update`), never by hand.
+- **`github` and `semver` packages** ([spicelang/packages](https://github.com/spicelang/packages)): bump them in
+  `src/spice.toml`, then regenerate `src/spice.lock` with a built Shaker (`cd src && ../build/spice-shaker update`),
+  never by hand.

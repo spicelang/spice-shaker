@@ -36,6 +36,9 @@ jobs:
       - name: Smoke test
         run: ./build/spice-shaker --help
 
+      # The built Shaker has to reproduce the committed lock file exactly (same versions and checksums)
       - name: Self-install
         working-directory: src
-        run: rm -rf spice_packages && ../build/spice-shaker sync
+        run: |
+          rm -rf spice_packages && ../build/spice-shaker sync
+          git diff --exit-code -- spice.lock

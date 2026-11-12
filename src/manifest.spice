@@ -6,9 +6,11 @@ import "std/text/toml/toml-value";
 import "std/text/toml/toml-parser";
 import "std/text/toml/toml-serializer";
 
+// Package imports
+import "spice_packages/semver/semver";
+
 // Own imports
 import "./util";
-import "./semver";
 import "./manifest-layout";
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -10,3 +10,4 @@ spice = ">=0.29.2"
 
 [dependencies]
 github = "^0.1.0"
+semver = "^0.1.0"
