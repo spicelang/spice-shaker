@@ -7,9 +7,11 @@ import "std/os/filesystem";
 import "std/text/print";
 import "std/type/type-conversion";
 
+// Package imports
+import "spice_packages/semver/semver";
+
 // Own imports
 import "./util";
-import "./semver";
 import "./manifest";
 import "./lockfile";
 import "./registry";
