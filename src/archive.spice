@@ -119,7 +119,8 @@ public f<bool> listArchiveFiles(const String& archive, const String& subdir, Vec
     args[0l] = String("-tvzf");
     Result<ProcessResult> details = runProcessCaptured(tar, args);
     if names.isErr() || details.isErr() {
-        error = String("Could not run 'tar'");
+        const Error& runError = names.isErr() ? names.getErr() : details.getErr();
+        error = String("Could not run '") + tar + "' (" + runError.getMessage() + ")";
         return false;
     }
     const ProcessResult& nameResult = names.unwrap();
