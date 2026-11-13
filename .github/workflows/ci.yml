@@ -9,15 +9,72 @@ on:
 
 jobs:
   build:
-    name: CI
-    runs-on: ubuntu-26.04
+    name: CI - ${{ matrix.name }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      # A failure on one platform should not hide the results of the others
+      fail-fast: false
+      # The platforms of the release workflow (release.yml)
+      matrix:
+        include:
+          - name: Linux/x86_64
+            runs-on: ubuntu-26.04
+            os: linux
+          - name: Linux/AArch64
+            runs-on: ubuntu-26.04-arm
+            os: linux
+          - name: MacOS/AArch64
+            runs-on: macos-26
+            os: darwin
+          - name: Windows/x86_64
+            runs-on: windows-2025
+            os: windows
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXE: spice-shaker${{ matrix.os == 'windows' && '.exe' || '' }}
+      PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install toolchain (clang, lld)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
+      - name: Install toolchain (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld libssl-dev pkg-config
+
+      # Homebrew's OpenSSL is keg-only and thus not on the default pkg-config path
+      - name: Install toolchain (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          brew update
+          brew install openssl@3 pkgconf
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
+      # The MinGW toolchain and OpenSSL of MSYS2, like in the release workflow. Its bin dir goes first on the PATH, so the
+      # compiler finds its clang (that searches the MSYS2 libraries) before the one of the runner
+      - name: Setup MSYS2 (Windows)
+        if: matrix.os == 'windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-lld
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-pkgconf
+          path-type: inherit
+
+      - name: Put MinGW on PATH (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" >> $env:GITHUB_PATH
 
       - name: Setup Spice
         uses: spicelang/spice-setup-action@v1
@@ -25,20 +82,20 @@ jobs:
       # Spice Shaker cannot install its own dependencies before it is built, so the first build gets them with the
       # bootstrap script. The self-install step below installs them again with the built Shaker.
       - name: Bootstrap dependencies
-        run: python3 bootstrap.py
+        run: $PYTHON bootstrap.py
 
       - name: Run unit tests
         run: spice test src/tests.spice
 
       - name: Build
-        run: python3 build.py
+        run: $PYTHON build.py
 
       - name: Smoke test
-        run: ./build/spice-shaker --help
+        run: ./build/"$EXE" --help
 
       # The built Shaker has to reproduce the committed lock file exactly (same versions and checksums)
       - name: Self-install
         working-directory: src
         run: |
-          rm -rf spice_packages && ../build/spice-shaker sync
+          rm -rf spice_packages && ../build/"$EXE" sync
           git diff --exit-code -- spice.lock

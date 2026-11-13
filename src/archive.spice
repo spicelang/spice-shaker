@@ -6,7 +6,9 @@ import "std/io/file";
 import "std/net/http" as http;
 import "std/net/http-client";
 import "std/os/cmd";
+import "std/os/env";
 import "std/os/filesystem";
+import "std/os/os";
 import "std/os/process";
 import "std/text/string-ext";
 import "std/type/type-conversion";
@@ -56,6 +58,22 @@ public f<String> tempArchivePath(const String& name) {
 }
 
 /**
+ * The tar program. On Windows, this is the bsdtar of the system (%SystemRoot%\System32\tar.exe) if it exists: the GNU tar of
+ * Git or MSYS2, that may come first on the PATH, reads an archive path with a drive letter ('C:\...') as a remote host and
+ * fails with "Cannot connect to C: resolve failed".
+ */
+public f<String> tarProgram() {
+    if isWindows() {
+        Result<string> systemRoot = getEnv("SystemRoot");
+        if systemRoot.isOk() {
+            const String systemTar = String(systemRoot.unwrap()) + "\\System32\\tar.exe";
+            if fileExists(systemTar.getRaw()) { return systemTar; }
+        }
+    }
+    return String("tar");
+}
+
+/**
  * Unpack a .tar.gz archive into an empty directory, dropping the single top-level folder that GitHub archives have.
  * With a `subdir`, only that directory of the archive is unpacked, as the root of `target`. `topLevel` is the name of the
  * top-level folder, as `listArchiveFiles` reports it.
@@ -77,7 +95,8 @@ public f<bool> unpackArchive(const String& archive, const String& target, const 
     args.pushBack(target);
     args.pushBack(String("--strip-components=") + toString(stripComponents));
     if !subdir.isEmpty() { args.pushBack(topLevel + "/" + subdir); }
-    if !runTool("tar", args) {
+    const String tar = tarProgram();
+    if !runTool(tar.getRaw(), args) {
         removeTree(target);
         error = String("Could not unpack ") + archive + ". Is 'tar' installed?";
         return false;
@@ -95,11 +114,13 @@ public f<bool> listArchiveFiles(const String& archive, const String& subdir, Vec
     Vector<String> args;
     args.pushBack(String("-tzf"));
     args.pushBack(archive);
-    Result<ProcessResult> names = runProcessCaptured(String("tar"), args);
+    const String tar = tarProgram();
+    Result<ProcessResult> names = runProcessCaptured(tar, args);
     args[0l] = String("-tvzf");
-    Result<ProcessResult> details = runProcessCaptured(String("tar"), args);
+    Result<ProcessResult> details = runProcessCaptured(tar, args);
     if names.isErr() || details.isErr() {
-        error = String("Could not run 'tar'");
+        const Error& runError = names.isErr() ? names.getErr() : details.getErr();
+        error = String("Could not run '") + tar + "' (" + runError.getMessage() + ")";
         return false;
     }
     const ProcessResult& nameResult = names.unwrap();
@@ -196,7 +217,8 @@ f<bool> testTreeChecksum() {
     args.pushBack(String("-C"));
     args.pushBack(base);
     args.pushBack(String("pkg-1.0"));
-    assert runTool("tar", args);
+    const String tar = tarProgram();
+    assert runTool(tar.getRaw(), args);
 
     Vector<String> files;
     String topLevel;
@@ -233,7 +255,8 @@ f<bool> testPackageInSubdirectory() {
     args.pushBack(String("-C"));
     args.pushBack(base);
     args.pushBack(String("repo-abc"));
-    assert runTool("tar", args);
+    const String tar = tarProgram();
+    assert runTool(tar.getRaw(), args);
 
     Vector<String> files;
     String topLevel;

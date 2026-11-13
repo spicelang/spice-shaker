@@ -11,8 +11,9 @@ permissions:
 
 env:
   # The Spice compiler that builds the release. spice.toml requires >=0.29.2, 0.29.3 is the first release that links OpenSSL
-  # statically with the flags from 'pkg-config --static', like the Spice Shaker that ships with the compiler.
-  SPICE_VERSION: '0.29.3'
+  # statically with the flags from 'pkg-config --static', like the Spice Shaker that ships with the compiler. 0.29.4 is the
+  # first release whose std can run programs with captured output on Windows, which Spice Shaker needs to unpack packages.
+  SPICE_VERSION: '0.29.4'
 
 jobs:
   check-version:
