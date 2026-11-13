@@ -1,0 +1,58 @@
+name: Setup Spice Shaker
+description: >
+  Installs a released Spice Shaker for the platform of the runner and puts it first on the PATH. Spice Shaker cannot install
+  its own dependencies before it is built, so a released version of it installs them. Run this after spice-setup-action,
+  so that it takes precedence over the Spice Shaker, that ships with the compiler on some platforms.
+
+inputs:
+  version:
+    description: Spice Shaker release to install. It has to be able to install the packages of src/spice.lock
+    default: "0.2.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify Spice Shaker
+      shell: bash
+      env:
+        SHAKER_VERSION: ${{ inputs.version }}
+      run: |
+        case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=darwin ;;
+          Windows) os=windows ;;
+          *) echo "::error::Unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::Unsupported runner arch $RUNNER_ARCH"; exit 1 ;;
+        esac
+        asset="spice-shaker_${os}_${arch}$([ "$os" = windows ] && echo .zip || echo .tar.gz)"
+        dest="$RUNNER_TEMP/spice-shaker-$SHAKER_VERSION"
+        python="$([ "$os" = windows ] && echo python || echo python3)"
+        # The archive is checked against the checksums file of the release before it is unpacked
+        "$python" - "$SHAKER_VERSION" "$asset" "$dest" <<'PY'
+        import hashlib, io, sys, tarfile, urllib.request, zipfile
+        version, asset, dest = sys.argv[1:]
+        base = f"https://github.com/spicelang/spice-shaker/releases/download/{version}/"
+        def fetch(name: str) -> bytes:
+            with urllib.request.urlopen(base + name, timeout=120) as response:
+                return response.read()
+        checksums = {}
+        for line in fetch("spice-shaker_checksums.txt").decode().splitlines():
+            if line.strip():
+                digest, name = line.split(maxsplit=1)
+                checksums[name.strip().lstrip("*")] = digest
+        data = fetch(asset)
+        if hashlib.sha256(data).hexdigest() != checksums.get(asset):
+            sys.exit(f"The checksum of {asset} does not match spice-shaker_checksums.txt of release {version}")
+        if asset.endswith(".zip"):
+            zipfile.ZipFile(io.BytesIO(data)).extractall(dest)
+        else:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                archive.extractall(dest, filter="data")
+        PY
+        chmod +x "$dest"/spice-shaker* || true
+        echo "$dest" >> "$GITHUB_PATH"
+        "$dest/spice-shaker" --version

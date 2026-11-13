@@ -57,9 +57,9 @@ commit via the GitHub API, archive from `codeload.github.com`; path packages: sy
   `~`, `1.2.x`, ranges, `*`) and `pickBestVersion`, imported as `spice_packages/semver/semver`. It implements the
   constraint syntax of `media/manifest-spec.md`; a change to that syntax is made in the package, released, and then
   bumped here.
-- **`bootstrap.py`** reimplements `sync` in Python for the packages in `src/spice.lock` (registry + GitHub sources,
-  subdirectories, the `sha256-tree:` checksum). Keep it in sync with `archive.spice` when the archive layout or
-  checksum definition changes.
+- **Released Spice Shaker**: Shaker cannot install its own dependencies before it is built, so a released Shaker
+  (`.github/actions/setup-spice-shaker` in CI, the one on the `PATH` for `build.py`) installs them. A change to the
+  lock format or the checksum definition has to stay readable by that release, or bump the pinned release first.
 - **`github` and `semver` packages** ([spicelang/packages](https://github.com/spicelang/packages)): bump them in
   `src/spice.toml`, then regenerate `src/spice.lock` with a built Shaker (`cd src && ../build/spice-shaker update`),
   never by hand.

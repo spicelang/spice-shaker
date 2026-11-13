@@ -60,9 +60,11 @@ Spice Shaker is a Spice package itself. Its manifest lives in `src/` (imports ca
 so the packages have to be installed below `src/`), and it uses the [github](https://github.com/spicelang/packages/tree/main/packages/github)
 package to talk to the GitHub API.
 
+Spice Shaker cannot install its own dependencies before it is built, so an installed Spice Shaker does it: the one, that ships
+with the Spice compiler on Linux and macOS, or a [release](https://github.com/spicelang/spice-shaker/releases) on the `PATH`.
+
 ```bash
-python3 bootstrap.py                 # install the dependencies from src/spice.lock to src/spice_packages without Spice Shaker
-python3 build.py                     # runs bootstrap.py and builds build/spice-shaker (.exe on Windows)
+python3 build.py                     # installs the dependencies with 'spice-shaker sync' and builds build/spice-shaker (.exe on Windows)
 spice test src/tests.spice           # unit tests
 ```
 

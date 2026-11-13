@@ -83,7 +83,8 @@ git checkout <type>/<slug>             # continue on the branch
   behavior updates the spec in the same PR, and is mirrored in Spice Rack if the registry reads that part
   (see `spice-shaker-architecture`).
 - `src/spice.lock` is generated: change dependencies in `src/spice.toml` and regenerate the lock with the built
-  Shaker, never edit it by hand. Keep `bootstrap.py` able to install what the lock file lists.
+  Shaker, never edit it by hand. The released Shaker, that CI installs the dependencies with, has to be able to
+  install what the lock file lists.
 - The version lives in two places: `[package] version` in `src/spice.toml` and `SHAKER_VERSION` in `src/driver.spice`.
   Bump both together.
 
@@ -92,7 +93,7 @@ git checkout <type>/<slug>             # continue on the branch
 Run the same checks as CI (details in the `spice-shaker-build-test` skill):
 
 ```sh
-python3 bootstrap.py                                           # 1. dependencies
+(cd src && spice-shaker sync)                                  # 1. dependencies, with a released Shaker
 spice test src/tests.spice                                     # 2. unit tests
 python3 build.py && ./build/spice-shaker --help                # 3. build + smoke test
 (cd src && rm -rf spice_packages && ../build/spice-shaker sync && git status --short .)   # 4. self-install, no lock diff
