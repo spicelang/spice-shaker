@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+# Only the release job writes, the build jobs run third-party code (the Spice compiler, the bootstrapped packages) read-only
+permissions:
+  contents: read
+
+env:
+  # The Spice compiler that builds the release. spice.toml requires >=0.29.2, 0.29.3 is the first release that links OpenSSL
+  # statically with the flags from 'pkg-config --static', like the Spice Shaker that ships with the compiler.
+  SPICE_VERSION: '0.29.3'
+
+jobs:
+  check-version:
+    name: Check version
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The released executable reports SHAKER_VERSION, and the package is published with the version of spice.toml. Both have
+      # to match the tag, which may have a 'v' prefix.
+      - name: Compare tag with spice.toml and SHAKER_VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          tag="${TAG#v}"
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' src/spice.toml | head -n 1)"
+          driver="$(sed -n 's/.*SHAKER_VERSION = "v\{0,1\}\([^"]*\)".*/\1/p' src/driver.spice)"
+          echo "Tag: $tag, spice.toml: $manifest, SHAKER_VERSION: $driver"
+          if [ "$tag" != "$manifest" ] || [ "$tag" != "$driver" ]; then
+            echo "::error::The tag $TAG does not match the version in src/spice.toml ($manifest) and SHAKER_VERSION in src/driver.spice ($driver)"
+            exit 1
+          fi
+
+  build:
+    name: Build - ${{ matrix.name }}
+    needs: check-version
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      # The platforms are independent of each other, like separate jobs
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux/x86_64
+            runs-on: ubuntu-26.04
+            os: linux
+            arch: amd64
+          - name: Linux/AArch64
+            runs-on: ubuntu-26.04-arm
+            os: linux
+            arch: arm64
+          - name: MacOS/AArch64
+            runs-on: macos-26
+            os: darwin
+            arch: arm64
+          - name: Windows/x86_64
+            runs-on: windows-2025
+            os: windows
+            arch: amd64
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARCHIVE_NAME: spice-shaker_${{ matrix.os }}_${{ matrix.arch }}
+      EXE: spice-shaker${{ matrix.os == 'windows' && '.exe' || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Toolchain per platform. zlib, zstd and jitterentropy provide the static archives that the static libcrypto of the runner
+      # needs ('pkg-config --static' lists them), libssl-dev the OpenSSL archives (see std/bindings/openssl)
+      - name: Install toolchain (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld libssl-dev libjitterentropy3-dev zlib1g-dev libzstd-dev pkg-config
+
+      # The released compiler loads Homebrew's libzstd, Spice Shaker links Homebrew's OpenSSL
+      - name: Install toolchain (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          brew update
+          brew install zstd openssl@3 pkgconf
+
+      # The MinGW toolchain and OpenSSL of MSYS2. Its bin dir goes first on the PATH, so the compiler finds its clang (that
+      # searches the MSYS2 libraries) before the one of the runner
+      - name: Setup MSYS2 (Windows)
+        if: matrix.os == 'windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-lld
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-pkgconf
+          path-type: inherit
+
+      - name: Put MinGW on PATH (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" >> $env:GITHUB_PATH
+
+      # spice-setup-action installs GCC with apt on every platform but Windows, so it cannot run on macOS
+      - name: Setup Spice
+        if: matrix.os != 'darwin'
+        uses: spicelang/spice-setup-action@v1
+        with:
+          spice-version: ${{ env.SPICE_VERSION }}
+
+      - name: Setup Spice (macOS)
+        if: matrix.os == 'darwin'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir="$RUNNER_TOOL_CACHE/spice/$SPICE_VERSION"
+          mkdir -p "$dir"
+          gh release download "$SPICE_VERSION" --repo spicelang/spice --pattern spice_darwin_arm64.tar.gz --output spice.tar.gz
+          tar -xzf spice.tar.gz -C "$dir"
+          rm spice.tar.gz
+          echo "$dir" >> "$GITHUB_PATH"
+          echo "SPICE_STD_DIR=$dir/std" >> "$GITHUB_ENV"
+
+      # Spice Shaker cannot install its own dependencies before it is built, so its bootstrap script installs them from the
+      # lock file
+      - name: Bootstrap dependencies
+        run: ${{ matrix.os == 'windows' && 'python' || 'python3' }} bootstrap.py
+
+      - name: Run unit tests
+        run: spice test src/tests.spice
+
+      - name: Build
+        run: |
+          mkdir -p build && cd build
+          flags=(-O3 -lto)
+          case "${{ matrix.os }}" in
+            # Linked statically, OpenSSL included. std/net/tls finds the CA certificates of distributions that keep them
+            # elsewhere than this runner.
+            linux) flags+=(--static) ;;
+            # Linked dynamically against Homebrew's OpenSSL (macOS has no static executables), which is keg-only and thus
+            # not on the default pkg-config path
+            darwin) export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" ;;
+            # Linked dynamically against the OpenSSL of MSYS2, whose DLLs are shipped next to the executable
+            windows) ;;
+          esac
+          spice build "${flags[@]}" --output "$EXE" ../src/main.spice
+          chmod +x "$EXE"
+          ./"$EXE" --version
+
+      - name: Inspect executable (Linux)
+        if: matrix.os == 'linux'
+        working-directory: build
+        run: |
+          file ./spice-shaker
+          # A static PIE: ET_DYN instead of ET_EXEC, without an interpreter
+          readelf -h ./spice-shaker | grep -E 'Type:\s+DYN'
+          ! readelf -l ./spice-shaker | grep -q 'INTERP'
+
+      - name: Inspect executable (macOS)
+        if: matrix.os == 'darwin'
+        working-directory: build
+        run: otool -L ./spice-shaker
+
+      # The DLLs from MSYS2 that the executable needs (OpenSSL, and the MinGW runtime if it is linked dynamically)
+      - name: Collect DLLs (Windows)
+        if: matrix.os == 'windows'
+        shell: msys2 {0}
+        working-directory: build
+        run: |
+          ldd ./spice-shaker.exe
+          ldd ./spice-shaker.exe | awk '$3 ~ /^\/mingw64\// { print $3 }' | sort -u | xargs -r -I{} cp -v {} .
+
+      - name: Package
+        run: |
+          mkdir -p "dist/$ARCHIVE_NAME"
+          cp "build/$EXE" LICENSE README.md "dist/$ARCHIVE_NAME/"
+          if [ "${{ matrix.os }}" = windows ]; then
+            cp build/*.dll "dist/$ARCHIVE_NAME/" 2>/dev/null || true
+            # Smoke test of the packaged executable, with only the shipped DLLs from outside the system dirs
+            (cd "dist/$ARCHIVE_NAME" && PATH="/c/Windows/system32:/c/Windows" ./"$EXE" --version)
+            (cd "dist/$ARCHIVE_NAME" && 7z a -tzip "../$ARCHIVE_NAME.zip" .)
+          else
+            tar -czf "dist/$ARCHIVE_NAME.tar.gz" -C "dist/$ARCHIVE_NAME" .
+          fi
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: dist
+        run: |
+          sha256sum spice-shaker_* > spice-shaker_checksums.txt
+          cat spice-shaker_checksums.txt
+
+      # Like the Spice compiler releases: named 'v<version>', with the changelog generated by GitHub, a pre-release for
+      # pre-release tags (e.g. 0.3.0-rc1)
+      - name: Create release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          args=(--verify-tag --title "v${TAG#v}" --generate-notes)
+          case "$TAG" in *-*) args+=(--prerelease) ;; esac
+          gh release create "$TAG" "${args[@]}" spice-shaker_*
