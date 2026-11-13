@@ -85,12 +85,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld libssl-dev libjitterentropy3-dev zlib1g-dev libzstd-dev pkg-config
 
-      # The released compiler loads Homebrew's libzstd, Spice Shaker links Homebrew's OpenSSL
+      # Spice Shaker links Homebrew's OpenSSL. The libzstd the released compiler loads comes with spice-setup-action
       - name: Install toolchain (macOS)
         if: matrix.os == 'darwin'
         run: |
           brew update
-          brew install zstd openssl@3 pkgconf
+          brew install openssl@3 pkgconf
 
       # The MinGW toolchain and OpenSSL of MSYS2. Its bin dir goes first on the PATH, so the compiler finds its clang (that
       # searches the MSYS2 libraries) before the one of the runner
@@ -114,25 +114,10 @@ jobs:
         shell: pwsh
         run: echo "${{ steps.msys2.outputs.msys2-location }}\mingw64\bin" >> $env:GITHUB_PATH
 
-      # spice-setup-action installs GCC with apt on every platform but Windows, so it cannot run on macOS
       - name: Setup Spice
-        if: matrix.os != 'darwin'
         uses: spicelang/spice-setup-action@v1
         with:
           spice-version: ${{ env.SPICE_VERSION }}
-
-      - name: Setup Spice (macOS)
-        if: matrix.os == 'darwin'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          dir="$RUNNER_TOOL_CACHE/spice/$SPICE_VERSION"
-          mkdir -p "$dir"
-          gh release download "$SPICE_VERSION" --repo spicelang/spice --pattern spice_darwin_arm64.tar.gz --output spice.tar.gz
-          tar -xzf spice.tar.gz -C "$dir"
-          rm spice.tar.gz
-          echo "$dir" >> "$GITHUB_PATH"
-          echo "SPICE_STD_DIR=$dir/std" >> "$GITHUB_ENV"
 
       # Spice Shaker cannot install its own dependencies before it is built, so its bootstrap script installs them from the
       # lock file
