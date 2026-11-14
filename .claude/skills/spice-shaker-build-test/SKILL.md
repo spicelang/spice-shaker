@@ -15,7 +15,10 @@ self-install. Reproduce the same sequence before pushing.
 - A released Spice Shaker on the `PATH` as `spice-shaker`. Shaker cannot install its own dependencies before it is
   built, so an installed one does it. It ships with the compiler on Linux and macOS; on Windows (or for another
   version), download it from https://github.com/spicelang/spice-shaker/releases. CI installs it with
-  `.github/actions/setup-spice-shaker`, whose `version` input pins the release.
+  `.github/actions/setup-spice-shaker`, whose `version` input pins the release. The OpenSSL DLLs of the Windows release
+  look for the CA certificates where an MSYS2 install keeps them (`..\etc\ssl\cert.pem`), so on Windows set
+  `SSL_CERT_FILE`, e.g. to `C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt` of Git for Windows (the action
+  does that), or `sync` fails with "TLS certificate verification failed".
 - `clang` and `lld` (CI installs them), `tar`, Python 3.9+, and network access to `rack.spicelang.com` and GitHub
   for the dependencies.
 

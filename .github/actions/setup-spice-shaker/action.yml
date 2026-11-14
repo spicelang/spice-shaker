@@ -2,7 +2,8 @@ name: Setup Spice Shaker
 description: >
   Installs a released Spice Shaker for the platform of the runner and puts it first on the PATH. Spice Shaker cannot install
   its own dependencies before it is built, so a released version of it installs them. Run this after spice-setup-action,
-  so that it takes precedence over the Spice Shaker, that ships with the compiler on some platforms.
+  so that it takes precedence over the Spice Shaker, that ships with the compiler on some platforms. On Windows, it also sets
+  SSL_CERT_FILE (unless SSL_CERT_FILE or SSL_CERT_DIR is set), so that the release finds the CA certificates.
 
 inputs:
   version:
@@ -56,3 +57,18 @@ runs:
         chmod +x "$dest"/spice-shaker* || true
         echo "$dest" >> "$GITHUB_PATH"
         "$dest/spice-shaker" --version
+
+    # The OpenSSL DLLs in the Windows release come from MSYS2 and look for the CA certificates relative to their own
+    # directory (..\etc\ssl\cert.pem), which the release does not contain. Without them, no server certificate can be
+    # verified, so SSL_CERT_FILE points to the CA bundle of Git for Windows, whose bash runs the steps of this action.
+    - name: Point OpenSSL to CA certificates (Windows)
+      if: runner.os == 'Windows' && env.SSL_CERT_FILE == '' && env.SSL_CERT_DIR == ''
+      shell: bash
+      run: |
+        bundle="$(cygpath -m /mingw64/etc/ssl/certs/ca-bundle.crt)"
+        if [ ! -f "$bundle" ]; then
+          echo "::error::No CA bundle at $bundle. Set SSL_CERT_FILE to a PEM file with the trusted CA certificates."
+          exit 1
+        fi
+        echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"
+        echo "SSL_CERT_FILE=$bundle"
