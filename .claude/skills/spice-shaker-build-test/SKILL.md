@@ -17,8 +17,8 @@ self-install. Reproduce the same sequence before pushing.
   version), download it from https://github.com/spicelang/spice-shaker/releases. CI installs it with
   `.github/actions/setup-spice-shaker`, whose `version` input pins the release. The OpenSSL DLLs of the Windows release
   look for the CA certificates where an MSYS2 install keeps them (`..\etc\ssl\cert.pem`), so on Windows set
-  `SSL_CERT_FILE`, e.g. to `C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt` of Git for Windows (the action
-  does that), or `sync` fails with "TLS certificate verification failed".
+  `SSL_CERT_FILE` to a PEM file with the trusted CA certificates (e.g. Mozilla's from https://curl.se/ca/cacert.pem;
+  the action exports the ones Windows trusts), or `sync` fails with "TLS certificate verification failed".
 - `clang` and `lld` (CI installs them), `tar`, Python 3.9+, and network access to `rack.spicelang.com` and GitHub
   for the dependencies.
 

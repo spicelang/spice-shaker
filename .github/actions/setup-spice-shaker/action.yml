@@ -3,7 +3,8 @@ description: >
   Installs a released Spice Shaker for the platform of the runner and puts it first on the PATH. Spice Shaker cannot install
   its own dependencies before it is built, so a released version of it installs them. Run this after spice-setup-action,
   so that it takes precedence over the Spice Shaker, that ships with the compiler on some platforms. On Windows, it also sets
-  SSL_CERT_FILE (unless SSL_CERT_FILE or SSL_CERT_DIR is set), so that the release finds the CA certificates.
+  SSL_CERT_FILE to the CA certificates Windows trusts (unless SSL_CERT_FILE or SSL_CERT_DIR is set), which the release
+  does not find by itself.
 
 inputs:
   version:
@@ -60,15 +61,26 @@ runs:
 
     # The OpenSSL DLLs in the Windows release come from MSYS2 and look for the CA certificates relative to their own
     # directory (..\etc\ssl\cert.pem), which the release does not contain. Without them, no server certificate can be
-    # verified, so SSL_CERT_FILE points to the CA bundle of Git for Windows, whose bash runs the steps of this action.
+    # verified, so SSL_CERT_FILE points to the certificates that Windows trusts for server authentication. They are
+    # exported the way Python's ssl module loads them on Windows (from the CA and ROOT stores).
     - name: Point OpenSSL to CA certificates (Windows)
       if: runner.os == 'Windows' && env.SSL_CERT_FILE == '' && env.SSL_CERT_DIR == ''
       shell: bash
       run: |
-        bundle="$(cygpath -m /mingw64/etc/ssl/certs/ca-bundle.crt)"
-        if [ ! -f "$bundle" ]; then
-          echo "::error::No CA bundle at $bundle. Set SSL_CERT_FILE to a PEM file with the trusted CA certificates."
-          exit 1
-        fi
+        bundle="$(cygpath -m "$RUNNER_TEMP/windows-ca-certificates.pem")"
+        python - "$bundle" <<'PY'
+        import ssl, sys
+        pems = []
+        for store in ("CA", "ROOT"):
+            for cert, encoding, trust in ssl.enum_certificates(store):
+                if encoding == "x509_asn" and (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust):
+                    pem = ssl.DER_cert_to_PEM_cert(cert)
+                    if pem not in pems:
+                        pems.append(pem)
+        if not pems:
+            sys.exit("Windows trusts no certificates for server authentication")
+        with open(sys.argv[1], "w", encoding="ascii") as file:
+            file.write("".join(pems))
+        print(f"Exported {len(pems)} certificates to {sys.argv[1]}")
+        PY
         echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"
-        echo "SSL_CERT_FILE=$bundle"

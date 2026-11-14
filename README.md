@@ -63,7 +63,7 @@ package to talk to the GitHub API.
 Spice Shaker cannot install its own dependencies before it is built, so an installed Spice Shaker does it: the one, that ships
 with the Spice compiler on Linux and macOS, or a [release](https://github.com/spicelang/spice-shaker/releases) on the `PATH`.
 On Windows, the release does not find the CA certificates by itself: set `SSL_CERT_FILE` to a PEM file with them, e.g.
-`C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt` of Git for Windows.
+Mozilla's from https://curl.se/ca/cacert.pem.
 
 ```bash
 python3 build.py                     # installs the dependencies with 'spice-shaker sync' and builds build/spice-shaker (.exe on Windows)
