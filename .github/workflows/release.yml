@@ -5,7 +5,7 @@ on:
     tags:
       - '*'
 
-# Only the release job writes, the build jobs run third-party code (the Spice compiler, the bootstrapped packages) read-only
+# Only the release job writes, the build jobs run third-party code (the Spice compiler and Spice Shaker, the packages) read-only
 permissions:
   contents: read
 
@@ -120,10 +120,14 @@ jobs:
         with:
           spice-version: ${{ env.SPICE_VERSION }}
 
-      # Spice Shaker cannot install its own dependencies before it is built, so its bootstrap script installs them from the
+      # Spice Shaker cannot install its own dependencies before it is built, so a released Spice Shaker installs them from the
       # lock file
-      - name: Bootstrap dependencies
-        run: ${{ matrix.os == 'windows' && 'python' || 'python3' }} bootstrap.py
+      - name: Setup Spice Shaker
+        uses: ./.github/actions/setup-spice-shaker
+
+      - name: Install dependencies
+        working-directory: src
+        run: spice-shaker sync
 
       - name: Run unit tests
         run: spice test src/tests.spice

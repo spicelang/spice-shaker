@@ -79,10 +79,14 @@ jobs:
       - name: Setup Spice
         uses: spicelang/spice-setup-action@v1
 
-      # Spice Shaker cannot install its own dependencies before it is built, so the first build gets them with the
-      # bootstrap script. The self-install step below installs them again with the built Shaker.
-      - name: Bootstrap dependencies
-        run: $PYTHON bootstrap.py
+      # Spice Shaker cannot install its own dependencies before it is built, so a released Spice Shaker installs them. The
+      # self-install step below installs them again with the built Shaker.
+      - name: Setup Spice Shaker
+        uses: ./.github/actions/setup-spice-shaker
+
+      - name: Install dependencies
+        working-directory: src
+        run: spice-shaker sync
 
       - name: Run unit tests
         run: spice test src/tests.spice

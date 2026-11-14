@@ -2,7 +2,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - 'src/**/*'
-          - 'bootstrap.py'
           - 'build.py'
 
 'tests':

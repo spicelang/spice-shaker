@@ -1,0 +1,86 @@
+name: Setup Spice Shaker
+description: >
+  Installs a released Spice Shaker for the platform of the runner and puts it first on the PATH. Spice Shaker cannot install
+  its own dependencies before it is built, so a released version of it installs them. Run this after spice-setup-action,
+  so that it takes precedence over the Spice Shaker, that ships with the compiler on some platforms. On Windows, it also sets
+  SSL_CERT_FILE to the CA certificates Windows trusts (unless SSL_CERT_FILE or SSL_CERT_DIR is set), which the release
+  does not find by itself.
+
+inputs:
+  version:
+    description: Spice Shaker release to install. It has to be able to install the packages of src/spice.lock
+    default: "0.2.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify Spice Shaker
+      shell: bash
+      env:
+        SHAKER_VERSION: ${{ inputs.version }}
+      run: |
+        case "$RUNNER_OS" in
+          Linux) os=linux ;;
+          macOS) os=darwin ;;
+          Windows) os=windows ;;
+          *) echo "::error::Unsupported runner OS $RUNNER_OS"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::Unsupported runner arch $RUNNER_ARCH"; exit 1 ;;
+        esac
+        asset="spice-shaker_${os}_${arch}$([ "$os" = windows ] && echo .zip || echo .tar.gz)"
+        dest="$RUNNER_TEMP/spice-shaker-$SHAKER_VERSION"
+        python="$([ "$os" = windows ] && echo python || echo python3)"
+        # The archive is checked against the checksums file of the release before it is unpacked
+        "$python" - "$SHAKER_VERSION" "$asset" "$dest" <<'PY'
+        import hashlib, io, sys, tarfile, urllib.request, zipfile
+        version, asset, dest = sys.argv[1:]
+        base = f"https://github.com/spicelang/spice-shaker/releases/download/{version}/"
+        def fetch(name: str) -> bytes:
+            with urllib.request.urlopen(base + name, timeout=120) as response:
+                return response.read()
+        checksums = {}
+        for line in fetch("spice-shaker_checksums.txt").decode().splitlines():
+            if line.strip():
+                digest, name = line.split(maxsplit=1)
+                checksums[name.strip().lstrip("*")] = digest
+        data = fetch(asset)
+        if hashlib.sha256(data).hexdigest() != checksums.get(asset):
+            sys.exit(f"The checksum of {asset} does not match spice-shaker_checksums.txt of release {version}")
+        if asset.endswith(".zip"):
+            zipfile.ZipFile(io.BytesIO(data)).extractall(dest)
+        else:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                archive.extractall(dest, filter="data")
+        PY
+        chmod +x "$dest"/spice-shaker* || true
+        echo "$dest" >> "$GITHUB_PATH"
+        "$dest/spice-shaker" --version
+
+    # The OpenSSL DLLs in the Windows release come from MSYS2 and look for the CA certificates relative to their own
+    # directory (..\etc\ssl\cert.pem), which the release does not contain. Without them, no server certificate can be
+    # verified, so SSL_CERT_FILE points to the certificates that Windows trusts for server authentication. They are
+    # exported the way Python's ssl module loads them on Windows (from the CA and ROOT stores).
+    - name: Point OpenSSL to CA certificates (Windows)
+      if: runner.os == 'Windows' && env.SSL_CERT_FILE == '' && env.SSL_CERT_DIR == ''
+      shell: bash
+      run: |
+        bundle="$(cygpath -m "$RUNNER_TEMP/windows-ca-certificates.pem")"
+        python - "$bundle" <<'PY'
+        import ssl, sys
+        pems = []
+        for store in ("CA", "ROOT"):
+            for cert, encoding, trust in ssl.enum_certificates(store):
+                if encoding == "x509_asn" and (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust):
+                    pem = ssl.DER_cert_to_PEM_cert(cert)
+                    if pem not in pems:
+                        pems.append(pem)
+        if not pems:
+            sys.exit("Windows trusts no certificates for server authentication")
+        with open(sys.argv[1], "w", encoding="ascii") as file:
+            file.write("".join(pems))
+        print(f"Exported {len(pems)} certificates to {sys.argv[1]}")
+        PY
+        echo "SSL_CERT_FILE=$bundle" >> "$GITHUB_ENV"
