@@ -10,15 +10,19 @@ permissions:
   contents: read
 
 env:
-  # The Spice compiler that builds the release. spice.toml requires >=0.29.2, 0.29.3 is the first release that links OpenSSL
-  # statically with the flags from 'pkg-config --static', like the Spice Shaker that ships with the compiler. 0.29.4 is the
-  # first release whose std can run programs with captured output on Windows, which Spice Shaker needs to unpack packages.
+  # The Spice compiler that builds the release. 0.29.4 is the first release whose std can run programs with captured output
+  # on Windows, which Spice Shaker needs to unpack packages.
   SPICE_VERSION: '0.29.4'
+  # The Linux executables link glibc dynamically and are built in this container, so they need its glibc (2.35) or a newer
+  # one. The compiler is a static executable and runs in it as well.
+  LINUX_BUILD_IMAGE: 'ubuntu:22.04'
+  # The newest glibc symbol version a Linux executable may require, the glibc of LINUX_BUILD_IMAGE
+  LINUX_MAX_GLIBC: '2.35'
 
 jobs:
   check-version:
     name: Check version
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -78,13 +82,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Toolchain per platform. zlib, zstd and jitterentropy provide the static archives that the static libcrypto of the runner
-      # needs ('pkg-config --static' lists them), libssl-dev the OpenSSL archives (see std/bindings/openssl)
+      # Toolchain per platform. On Linux for the unit tests on the runner, the release itself is built in LINUX_BUILD_IMAGE
       - name: Install toolchain (Linux)
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld libssl-dev libjitterentropy3-dev zlib1g-dev libzstd-dev pkg-config
+          sudo apt-get install -y --no-install-recommends clang lld libssl-dev pkg-config
 
       # Spice Shaker links Homebrew's OpenSSL. The libzstd the released compiler loads comes with spice-setup-action
       - name: Install toolchain (macOS)
@@ -132,14 +135,25 @@ jobs:
       - name: Run unit tests
         run: spice test src/tests.spice
 
+      # glibc linked dynamically, OpenSSL statically, in a container with an older glibc than the runner's (see the script).
+      # std/net/tls finds the CA certificates of distributions that keep them elsewhere than Ubuntu.
+      - name: Build (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          spice_dir="$(dirname "$(command -v spice)")"
+          docker run --rm \
+            -v "$spice_dir:$spice_dir:ro" -v "$SPICE_STD_DIR:$SPICE_STD_DIR:ro" -v "$PWD:/work" -w /work \
+            -e "PATH=$spice_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" -e SPICE_STD_DIR \
+            -e "OWNER=$(id -u):$(id -g)" \
+            "$LINUX_BUILD_IMAGE" bash .github/scripts/build-linux-release.sh
+          ./build/"$EXE" --version
+
       - name: Build
+        if: matrix.os != 'linux'
         run: |
           mkdir -p build && cd build
           flags=(-O3 -lto)
           case "${{ matrix.os }}" in
-            # Linked statically, OpenSSL included. std/net/tls finds the CA certificates of distributions that keep them
-            # elsewhere than this runner.
-            linux) flags+=(--static) ;;
             # Linked dynamically against Homebrew's OpenSSL (macOS has no static executables), which is keg-only and thus
             # not on the default pkg-config path
             darwin) export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" ;;
@@ -155,9 +169,19 @@ jobs:
         working-directory: build
         run: |
           file ./spice-shaker
-          # A static PIE: ET_DYN instead of ET_EXEC, without an interpreter
-          readelf -h ./spice-shaker | grep -E 'Type:\s+DYN'
-          ! readelf -l ./spice-shaker | grep -q 'INTERP'
+          readelf -d ./spice-shaker | grep NEEDED
+          # Only libraries of every glibc system are loaded, OpenSSL is linked in
+          if readelf -d ./spice-shaker | grep NEEDED | grep -vE '\[(libc\.so\.6|libgcc_s\.so\.1|ld-linux[^]]*\.so\.[0-9]+)\]'; then
+            echo "::error::The executable needs other shared libraries than glibc and libgcc"
+            exit 1
+          fi
+          # No glibc symbol newer than the glibc of the build container
+          newest="$(objdump -T ./spice-shaker | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)"
+          echo "Newest required glibc symbol version: $newest"
+          if [ "$(printf '%s\n%s\n' "$newest" "$LINUX_MAX_GLIBC" | sort -V | tail -n 1)" != "$LINUX_MAX_GLIBC" ]; then
+            echo "::error::The executable needs glibc $newest, newer than $LINUX_MAX_GLIBC"
+            exit 1
+          fi
 
       - name: Inspect executable (macOS)
         if: matrix.os == 'darwin'
