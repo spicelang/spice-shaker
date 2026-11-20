@@ -79,9 +79,9 @@ git checkout <type>/<slug>             # continue on the branch
 
 ## Repository rules
 
-- `media/manifest-spec.md` is the specification. A change to the manifest or lock format, resolution or command
-  behavior updates the spec in the same PR, and is mirrored in Spice Rack if the registry reads that part
-  (see `spice-shaker-architecture`).
+- `media/manifest-spec.md` is the specification of the lock file, resolution and the commands; a change to them updates
+  the spec in the same PR. The format of `spice.toml` belongs to the `manifest` package of spicelang/packages: change it
+  there, release it and bump it in `src/spice.toml` (see `spice-shaker-architecture`).
 - `src/spice.lock` is generated: change dependencies in `src/spice.toml` and regenerate the lock with the built
   Shaker, never edit it by hand. The released Shaker, that CI installs the dependencies with, has to be able to
   install what the lock file lists.

@@ -4,72 +4,14 @@ import "std/io/dir";
 import "std/io/file";
 import "std/os/os";
 import "std/os/process";
-import "std/text/analysis";
-import "std/text/format";
+
+// Package imports
+import "spice_packages/manifest/manifest";
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Small helpers shared by all other modules: name rules, string helpers the std does not have and file system operations
-// that need external programs
+// Small helpers shared by all other modules: the rule for package dirs, string helpers the std does not have and file system
+// operations that need external programs. The name rules are in the manifest package.
 // ---------------------------------------------------------------------------------------------------------------------
-
-public const unsigned long MAX_NAME_LENGTH = 64l;
-
-/**
- * Package and dependency names: lower-case letters, digits, '-' and '_', starting with a letter or digit.
- * Everything that ends up in a path or a command line has to pass this check.
- */
-public f<bool> isValidPackageName(const String& name) {
-    const unsigned long len = name.getLength();
-    if len == 0l || len > MAX_NAME_LENGTH || !isLowerAlnum(name[0l]) { return false; }
-    for unsigned long i = 1l; i < len; i++ {
-        const char c = name[i];
-        if !isLowerAlnum(c) && c != '-' && c != '_' { return false; }
-    }
-    return true;
-}
-
-public f<bool> isLowerAlnum(char c) {
-    return isLower(c) || isDigit(c);
-}
-
-/**
- * Turn arbitrary text (a directory or repository name) into a valid package name
- */
-public f<String> sanitizeName(const String& input) {
-    const String lowered = toLower(input);
-    String sanitized;
-    for unsigned long i = 0l; i < lowered.getLength() && i < MAX_NAME_LENGTH; i++ {
-        const char c = lowered[i];
-        sanitized.append(isLowerAlnum(c) || c == '-' || c == '_' ? c : '-');
-    }
-    // The first character has to be a letter or digit
-    while !sanitized.isEmpty() && !isLowerAlnum(sanitized[0l]) { sanitized = sanitized.getSubstring(1l); }
-    return sanitized;
-}
-
-/**
- * A GitHub user, organization or repository name: letters, digits, '-', '_' and '.'
- */
-public f<bool> isValidGithubName(const String& name) {
-    const unsigned long len = name.getLength();
-    if len == 0l || len > 100l || name == "." || name == ".." { return false; }
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = name[i];
-        if !isAlphaNum(c) && c != '-' && c != '_' && c != '.' { return false; }
-    }
-    return true;
-}
-
-/**
- * "owner/repo" with two valid GitHub names
- */
-public f<bool> isValidGithubRepo(const String& ownerAndRepo) {
-    const long slash = ownerAndRepo.find('/');
-    if slash < 0l { return false; }
-    const String owner = ownerAndRepo.getSubstring(0l, slash);
-    const String repo = ownerAndRepo.getSubstring(cast<unsigned long>(slash) + 1l);
-    return isValidGithubName(owner) && isValidGithubName(repo);
-}
 
 /**
  * Directory of a package inside its repository, e.g. "packages/github": segments that are valid GitHub names, separated by '/'
@@ -85,19 +27,6 @@ public f<bool> isValidPackageDir(const String& dir) {
         }
         if !isValidGithubName(segment) { return false; }
         segment = String("");
-    }
-    return true;
-}
-
-/**
- * A git ref (tag, branch or sha) that is safe to use in a URL
- */
-public f<bool> isValidGitRef(const String& ref) {
-    const unsigned long len = ref.getLength();
-    if len == 0l || len > 100l || ref.contains("..") { return false; }
-    for unsigned long i = 0l; i < len; i++ {
-        const char c = ref[i];
-        if !isAlphaNum(c) && c != '-' && c != '_' && c != '.' && c != '/' { return false; }
     }
     return true;
 }
@@ -133,44 +62,6 @@ public f<bool> containsString(const Vector<String>& list, const String& value) {
         if list.get(i) == value { return true; }
     }
     return false;
-}
-
-/**
- * Levenshtein distance, used to suggest the right key for a typo
- */
-public f<unsigned long> editDistance(const String& a, const String& b) {
-    const unsigned long n = b.getLength();
-    Vector<unsigned long> row;
-    for unsigned long j = 0l; j <= n; j++ { row.pushBack(j); }
-    for unsigned long i = 1l; i <= a.getLength(); i++ {
-        unsigned long diagonal = row.get(0l);
-        row[0l] = i;
-        for unsigned long j = 1l; j <= n; j++ {
-            const unsigned long above = row.get(j);
-            unsigned long best = diagonal + (a[i - 1l] == b[j - 1l] ? 0l : 1l);
-            if above + 1l < best { best = above + 1l; }
-            if row.get(j - 1l) + 1l < best { best = row.get(j - 1l) + 1l; }
-            row[j] = best;
-            diagonal = above;
-        }
-    }
-    return row.get(n);
-}
-
-/**
- * The candidate closest to the input, if it is at most two edits away. Empty otherwise.
- */
-public f<String> closestMatch(const String& input, const Vector<String>& candidates) {
-    String best;
-    unsigned long bestDistance = 3l;
-    for unsigned long i = 0l; i < candidates.getSize(); i++ {
-        const unsigned long distance = editDistance(input, candidates.get(i));
-        if distance < bestDistance {
-            bestDistance = distance;
-            best = candidates.get(i);
-        }
-    }
-    return best;
 }
 
 public f<String> padRight(const String& input, unsigned long width) {
@@ -323,22 +214,7 @@ public f<bool> writeTextFile(const String& path, const String& content) {
 }
 
 #[test]
-f<bool> testNameValidation() {
-    assert isValidPackageName(String("json-parser_2"));
-    assert !isValidPackageName(String("Json"));
-    assert !isValidPackageName(String("-json"));
-    assert !isValidPackageName(String("a b"));
-    assert !isValidPackageName(String("$(rm)"));
-    assert sanitizeName(String("My.Repo Name")) == "my-repo-name";
-    assert sanitizeName(String("--x")) == "x";
-    assert isValidGithubName(String("spice.lang"));
-    assert !isValidGithubName(String(".."));
-    assert isValidGithubRepo(String("owner/Repo.x"));
-    assert !isValidGithubRepo(String("owner"));
-    assert !isValidGithubRepo(String("a/b/c"));
-    assert isValidGitRef(String("feature/x-1.2"));
-    assert !isValidGitRef(String("a;b"));
-    assert !isValidGitRef(String("a/../b"));
+f<bool> testPackageDirValidation() {
     assert isValidPackageDir(String("packages/github"));
     assert isValidPackageDir(String("github"));
     assert !isValidPackageDir(String(""));
@@ -352,14 +228,6 @@ f<bool> testNameValidation() {
 
 #[test]
 f<bool> testStringHelpers() {
-    assert editDistance(String("verison"), String("version")) == 2l;
-    assert editDistance(String(""), String("abc")) == 3l;
-    Vector<String> keys;
-    keys.pushBack(String("version"));
-    keys.pushBack(String("github"));
-    assert closestMatch(String("verison"), keys) == "version";
-    const String noMatch = closestMatch(String("completely-different"), keys);
-    assert noMatch.isEmpty();
     Vector<String> list;
     list.pushBack(String("b"));
     list.pushBack(String("a_"));

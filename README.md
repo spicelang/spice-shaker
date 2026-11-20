@@ -52,8 +52,8 @@ test-kit = "~1.2.0"
 
 Packages (and their dependencies) are installed to `spice_packages/<name>/`; the resolved versions, commits and content checksums are
 written to `spice.lock`. Import their sources relative to your file, e.g. `import "spice_packages/json-parser/src/main";`. Version
-constraints follow the registry: `1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0, <2.0.0`, `*`. The full format is specified in
-[media/manifest-spec.md](./media/manifest-spec.md).
+constraints follow the registry: `1.2.3`, `^1.2.3`, `~1.2.3`, `1.2.x`, `>=1.0.0, <2.0.0`, `*`. The format of `spice.toml` is specified
+by the [manifest package](https://github.com/spicelang/packages/blob/main/packages/manifest/README.md#the-format), the lock file and the behavior of Shaker in [media/manifest-spec.md](./media/manifest-spec.md).
 
 ## Development
 Spice Shaker is a Spice package itself. Its manifest lives in `src/` (imports cannot leave the directory of the importing file,

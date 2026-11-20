@@ -9,11 +9,12 @@ import "std/os/process";
 import "std/text/print";
 
 // Package imports
+import "spice_packages/manifest/manifest";
+import "spice_packages/manifest/manifest-file";
 import "spice_packages/semver/semver";
 
 // Own imports
 import "./util";
-import "./manifest";
 import "./lockfile";
 import "./registry";
 import "./archive";

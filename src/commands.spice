@@ -8,11 +8,12 @@ import "std/text/print";
 import "std/type/type-conversion";
 
 // Package imports
+import "spice_packages/manifest/manifest";
+import "spice_packages/manifest/manifest-file";
 import "spice_packages/semver/semver";
 
 // Own imports
 import "./util";
-import "./manifest";
 import "./lockfile";
 import "./registry";
 import "./installer";
@@ -220,7 +221,7 @@ public f<int> runInstall(const InstallRequest& request) {
         dep.version = picked.valid && picked.pre.isEmpty() ? String("^") + picked.toString() : entry.version;
         if !planned.setDependency(dep, errors) { printErrors(errors); return finish(installer, manifest, false); }
     }
-    if !planned.save() {
+    if !saveManifest(planned) {
         println(String("error: Could not write ") + MANIFEST_FILE);
         return finish(installer, manifest, false);
     }
@@ -276,7 +277,7 @@ public f<int> runUninstall(const String& name) {
     }
     Vector<String> errors;
     if !manifest.removeDependency(name, errors) { printErrors(errors); return EXIT_FAILED; }
-    if !manifest.save() {
+    if !saveManifest(manifest) {
         println(String("error: Could not write ") + MANIFEST_FILE);
         return EXIT_FAILED;
     }
