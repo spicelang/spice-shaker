@@ -11,7 +11,7 @@ self-install. Reproduce the same sequence before pushing.
 ## Prerequisites
 
 - The Spice compiler on the `PATH` as `spice` (`build.py` calls `spice` directly), with its std (`SPICE_STD_DIR` for
-  a release archive). `src/spice.toml` requires `spice >= 0.29.4`.
+  a release archive). `src/spice.toml` requires `spice >= 0.30.0`.
 - A released Spice Shaker on the `PATH` as `spice-shaker`. Shaker cannot install its own dependencies before it is
   built, so an installed one does it. It ships with the compiler on Linux and macOS; on Windows (or for another
   version), download it from https://github.com/spicelang/spice-shaker/releases. CI installs it with
