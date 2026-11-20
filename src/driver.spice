@@ -5,7 +5,7 @@ import "std/io/cli-subcommand";
 // Own imports
 import "./commands";
 
-public const string SHAKER_VERSION = "v0.2.0";
+public const string SHAKER_VERSION = "v0.3.0";
 
 public type CliOptions struct {
     InstallRequest install

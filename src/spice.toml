@@ -1,6 +1,6 @@
 [package]
 name = "spice-shaker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official package manager for the Spice programming language"
 license = "MIT"
 authors = ["Marc Auberer <marc.auberer@chillibits.com>"]
