@@ -7,6 +7,11 @@ on:
       - main
       - feature/**
 
+env:
+  # The Spice compiler of the release workflow (SPICE_VERSION in release.yml). Without a version, spice-setup-action installs
+  # the newest 0.29.x, which neither spice.toml (>=0.30.0) nor the manifest package (>=0.30.0) accepts
+  SPICE_VERSION: '0.30.0'
+
 jobs:
   build:
     name: CI - ${{ matrix.name }}
@@ -78,6 +83,8 @@ jobs:
 
       - name: Setup Spice
         uses: spicelang/spice-setup-action@v1
+        with:
+          spice-version: ${{ env.SPICE_VERSION }}
 
       # Spice Shaker cannot install its own dependencies before it is built, so a released Spice Shaker installs them. The
       # self-install step below installs them again with the built Shaker.
