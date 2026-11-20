@@ -1,17 +1,19 @@
 ---
 name: spice-shaker-architecture
-description: Orientation map of Spice Shaker, the Spice package manager — the module layout of `src/` (driver → commands → installer → registry/archive, manifest/lockfile models, version constraints from the `semver` package), how `install`/`sync`/`update` resolve and install packages, the format spec in `media/manifest-spec.md`, and the contracts with the Spice Rack registry and the `github` and `semver` packages. Use when navigating the code, deciding where a change belongs, or changing the manifest/lock format or resolution rules.
+description: Orientation map of Spice Shaker, the Spice package manager — the module layout of `src/` (driver → commands → installer → registry/archive, lockfile model; the manifest model from the `manifest` package and version constraints from the `semver` package), how `install`/`sync`/`update` resolve and install packages, the format spec in `media/manifest-spec.md`, and the contracts with the Spice Rack registry and the `github`, `manifest` and `semver` packages. Use when navigating the code, deciding where a change belongs, or changing the manifest/lock format or resolution rules.
 ---
 
 # Spice Shaker architecture
 
 Spice Shaker is written in Spice and is itself a Spice package: its manifest is `src/spice.toml`, its lock file
-`src/spice.lock`, and its dependencies (the [github](https://github.com/spicelang/packages/tree/main/packages/github)
-and [semver](https://github.com/spicelang/packages/tree/main/packages/semver) packages) are installed to
+`src/spice.lock`, and its dependencies (the [github](https://github.com/spicelang/packages/tree/main/packages/github),
+[manifest](https://github.com/spicelang/packages/tree/main/packages/manifest) and
+[semver](https://github.com/spicelang/packages/tree/main/packages/semver) packages) are installed to
 `src/spice_packages/` (imports cannot leave the directory of the importing file, so the packages live below `src/`).
 
-**`media/manifest-spec.md` is the specification** of `spice.toml`, `spice.lock`, checksums, resolution, how Shaker edits
-manifests, validation, and the commands. Behavior changes go into the spec in the same PR.
+**`media/manifest-spec.md` is the specification** of `spice.lock`, checksums, resolution and the commands. The format of
+`spice.toml` (tables, names, validation, comment-preserving editing) is specified and implemented by the `manifest` package.
+Behavior changes go into the spec in the same PR.
 
 ## Module map (`src/`)
 
@@ -23,15 +25,14 @@ manifests, validation, and the commands. Behavior changes go into the spec in th
 | `installer.spice` | `Installer`: breadth-first resolution over manifests, compiler version check (`spice` constraint), pruning of unreachable packages, symlinks for path dependencies |
 | `registry.spice` | `Registry` client for the Spice Rack JSON API (`SPICE_RACK_URL` overrides the default) and GitHub commit resolution through the `github` package (`import "spice_packages/github/github" as gh`) |
 | `archive.spice` | Download, list and unpack `.tar.gz` archives with `tar` (also a subdirectory for monorepo packages), `sha256-tree:` checksums |
-| `manifest.spice` | `Manifest` / `Dependency` model, parsing with the std TOML parser, validation, rendering |
-| `manifest-layout.spice` | Line scanner that edits dependency lines in place, so comments and formatting of `spice.toml` survive |
 | `lockfile.spice` | `Lockfile` / `LockEntry`: parse, serialize (`TomlSerializer`), load/save `spice.lock` |
-| `util.spice` | Name rules (`isValidPackageName`, GitHub names, refs, package dirs), string helpers, edit distance for suggestions |
+| `util.spice` | The package dir rule (`isValidPackageDir`), string helpers, file system operations through external programs |
+| `manifest` package | `Manifest` / `Dependency` model, validation, comment-preserving editing (`manifest.spice`), `loadManifest` / `saveManifest` (`manifest-file.spice`), the name rules (`isValidPackageName`, `isValidRegistryName`, GitHub names, refs) |
 | `tests.spice` | Imports every module so `spice test src/tests.spice` runs all `#[test]` functions |
 
 ## How a command runs
 
-`install <pkg>`: validate the request → edit `spice.toml` through `manifest-layout` (verified by re-parsing) → the
+`install <pkg>`: validate the request → edit `spice.toml` with `Manifest.setDependency` of the `manifest` package (verified by re-parsing) → the
 `Installer` resolves the manifest breadth-first (first requirement per name wins, a different source for a name is
 an error, an unsatisfied constraint a warning) → registry packages: versions from `/api/v1/packages/{name}`, archive
 from `.../versions/{version}/download`, only the reported `path` subdirectory is unpacked; GitHub packages: ref →
@@ -43,16 +44,18 @@ commit via the GitHub API, archive from `codeload.github.com`; path packages: sy
 
 ## Safety rules in the code
 
-- Everything that ends up in a path or a command line passes a validator from `util.spice` first.
+- Everything that ends up in a path or a command line passes a validator from `util.spice` or the `manifest` package first.
 - External programs (`tar`, platform tools for removing directories and creating links) get their arguments directly,
   never through a shell.
 - Archive entries with `..` or absolute paths are skipped; archives are limited to 256 MiB (`MAX_ARCHIVE_SIZE`).
 
 ## Cross-repo contracts
 
-- **Spice Rack** ([spicelang/spice-rack](https://github.com/spicelang/spice-rack)) serves the JSON API and reads
-  `spice.toml` itself (`parseManifestDependencies` in its `src/github.spice`). A change to the manifest format has to
-  be mirrored there.
+- **Spice Rack** ([spicelang/spice-rack](https://github.com/spicelang/spice-rack)) serves the JSON API and reads the
+  `spice.toml` of each release.
+- **`manifest` package** ([spicelang/packages](https://github.com/spicelang/packages)): the format of `spice.toml`, shared
+  with Spice Rack and the compiler, imported as `spice_packages/manifest/manifest` (and `.../manifest-file` for file
+  access). A change to the format is made in the package, released, and then bumped here.
 - **`semver` package** ([spicelang/packages](https://github.com/spicelang/packages)): versions and constraints (`^`,
   `~`, `1.2.x`, ranges, `*`) and `pickBestVersion`, imported as `spice_packages/semver/semver`. It implements the
   constraint syntax of `media/manifest-spec.md`; a change to that syntax is made in the package, released, and then

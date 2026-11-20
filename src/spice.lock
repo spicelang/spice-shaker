@@ -9,6 +9,13 @@ checksum = "sha256-tree:631236b815b0758c41c8a1630187cb8ef32c00bb1695d92215a19bbb
 dependencies = []
 
 [[package]]
+name = "manifest"
+source = "registry"
+version = "0.1.1"
+checksum = "sha256-tree:8b7d502ce426341fda34915c96a63de81b4f27b88796398d43933da5ef50e4d7"
+dependencies = ["semver"]
+
+[[package]]
 name = "semver"
 source = "registry"
 version = "0.1.0"

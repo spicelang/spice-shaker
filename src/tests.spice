@@ -1,7 +1,5 @@
 // Own imports
 import "./util";
-import "./manifest-layout";
-import "./manifest";
 import "./lockfile";
 import "./registry";
 import "./archive";

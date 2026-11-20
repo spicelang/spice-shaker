@@ -2,9 +2,11 @@
 
 Format version: **1** (manifest and lock file)
 
-This document specifies `spice.toml`, the project manifest of Spice packages, and `spice.lock`, the lock file written by Spice Shaker,
-together with the behavior of Spice Shaker that depends on them. Both files are [TOML v1.0.0](https://toml.io/en/v1.0.0) documents and
-are read and written with the TOML implementation of the standard library (`std/text/toml/*`).
+This document specifies `spice.lock`, the lock file written by Spice Shaker, and the behavior of Spice Shaker that depends on it and on
+`spice.toml`, the project manifest of Spice packages. The format of `spice.toml` itself is specified by the
+[manifest package](https://github.com/spicelang/packages/blob/main/packages/manifest/README.md#the-format), which Spice Shaker, Spice Rack and the compiler use to read it. Both files are
+[TOML v1.0.0](https://toml.io/en/v1.0.0) documents and are read and written with the TOML implementation of the standard library
+(`std/text/toml/*`).
 
 The keywords "must", "must not" and "should" are used as in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
@@ -51,18 +53,14 @@ Every command except `init`, `search` and `info` requires a `spice.toml` in the 
 
 ## `spice.toml`
 
-### Example
+The format of `spice.toml` (tables, keys, names, version constraints, validation, and how dependencies are edited without touching
+the rest of the file) is specified in the README of the [manifest package](https://github.com/spicelang/packages/blob/main/packages/manifest/README.md#the-format). Shaker reads, validates and edits
+manifests with that package, so its rules apply exactly. A minimal manifest:
 
 ```toml
 [package]
 name = "my-app"
 version = "0.1.0"
-description = "Does things"
-license = "MIT"
-authors = ["Jane Doe <jane@example.com>"]
-repository = "https://github.com/jane/my-app"
-spice = ">=0.29.0"
-entry = "src/lib.spice"
 
 [dependencies]
 json-parser = "^1.2.0"
@@ -71,61 +69,15 @@ my-local = { path = "../my-local" }
 
 [dev-dependencies]
 test-kit = "~1.2.0"
-
-[tool.some-linter]
-max-line = 120
 ```
 
-### Top-level tables
+On top of the format, Shaker defines:
 
-| Table                | Required | Description                                       |
-|----------------------|----------|---------------------------------------------------|
-| `[package]`          | yes      | Metadata of the package                           |
-| `[dependencies]`     | no       | Dependencies needed to build and run the package  |
-| `[dev-dependencies]` | no       | Dependencies only needed to develop and test it   |
-| `[tool]`             | no       | Configuration of other tools, ignored by Shaker   |
+**Compiler check.** If `package.spice` is set, Shaker determines the compiler version from the first line of `spice --version` that
+starts with `Spice version:`. If the compiler cannot be run or the version is not valid SemVer (e.g. a development build), the check is
+skipped. Otherwise a mismatch is a **warning** for the root project and an **error** for a dependency.
 
-Any other top-level key is an error. Shaker never reads or validates anything below `[tool]`; each tool uses only
-`[tool.<its own name>]`.
-
-### `[package]`
-
-| Key           | Type             | Required | Description |
-|---------------|------------------|----------|-------------|
-| `name`        | string           | yes      | Package name, see [Names](#names) |
-| `version`     | string           | yes      | Version of the package, [SemVer 2.0.0](https://semver.org) without a leading `v` |
-| `description` | string           | no       | One-line summary |
-| `license`     | string           | no       | [SPDX license expression](https://spdx.org/licenses/), e.g. `"MIT OR Apache-2.0"` |
-| `authors`     | array of strings | no       | `"Name <email>"` or `"Name"` |
-| `repository`  | string           | no       | URL of the source repository |
-| `homepage`    | string           | no       | URL of the project website |
-| `spice`       | string           | no       | [Version constraint](#version-constraints) on the Spice compiler |
-| `entry`       | string           | no       | File consumers import, relative to the package root. Default: `src/main.spice` |
-
-Any other key in `[package]` is an error. `entry` must be a relative path with `/` as separator, must not contain `..` components and
-must end in `.spice`. Shaker does not check that the file exists.
-
-**Compiler check.** If `spice` is set, Shaker determines the compiler version from the first line of `spice --version` that starts
-with `Spice version:`. If the compiler cannot be run or the version is not valid SemVer (e.g. a development build), the check is skipped.
-Otherwise a mismatch is a **warning** for the root project and an **error** for a dependency.
-
-### Dependencies
-
-`[dependencies]` and `[dev-dependencies]` map a **dependency name** to a **dependency specification**. The dependency name is the name
-of the directory below `spice_packages/` and must be a valid [package name](#names). A name must not appear in both tables.
-
-A specification is either a string (short form) or an inline table (detailed form). The short form `"^1.2.0"` is equivalent to
-`{ version = "^1.2.0" }`. Shaker always writes the short form for registry dependencies.
-
-| Key       | Type   | Description |
-|-----------|--------|-------------|
-| `version` | string | [Version constraint](#version-constraints) for a registry package |
-| `github`  | string | `owner/repo` of a GitHub repository |
-| `rev`     | string | Tag, branch or commit sha of the GitHub repository. Default: the repository's default branch |
-| `path`    | string | Path of a local package, relative to the project root, with `/` as separator |
-
-Exactly one of `version`, `github` and `path` must be present. `rev` is only allowed together with `github`. Any other key is an
-error.
+**Allowed sources.** Which kinds of dependencies a manifest may have depends on how the package itself was installed:
 
 | Source   | Allowed in the manifest of                      |
 |----------|-------------------------------------------------|
@@ -135,33 +87,6 @@ error.
 
 A dependency that violates this table (e.g. a registry package that depends on a GitHub repository) fails to install. The
 `[dev-dependencies]` of dependencies are ignored.
-
-**Format restriction.** Every dependency must be written as a single `name = value` line inside a `[dependencies]` or
-`[dev-dependencies]` section. The table headers must be written exactly like that (bare keys, optionally surrounded by spaces inside
-the brackets). Sub-tables (`[dependencies.foo]`), dotted keys (`foo.version = "1.0"`), quoted dependency names and a top-level
-`dependencies = { ... }` are errors. This keeps [editing by Shaker](#editing-by-shaker) simple and safe; TOML does not allow line breaks
-inside inline tables, so the restriction costs no expressiveness.
-
-### Names
-
-Package and dependency names consist of lowercase ASCII letters, digits, `-` and `_`, start with a letter or digit and are at most 64
-characters long.
-
-### Version constraints
-
-A constraint is a list of clauses separated by commas and/or spaces. A version satisfies the constraint if it satisfies every clause.
-
-| Clause              | Matches                                                 |
-|---------------------|---------------------------------------------------------|
-| `1.2.3`, `=1.2.3`   | exactly `1.2.3`                                          |
-| `^1.2.3`            | `>=1.2.3, <2.0.0`; `^0.2.3` = `>=0.2.3, <0.3.0`; `^0.0.3` = `>=0.0.3, <0.0.4` |
-| `~1.2.3`            | `>=1.2.3, <1.3.0`                                        |
-| `1.2.x`, `1.x`      | `>=1.2.0, <1.3.0` and `>=1.0.0, <2.0.0`                  |
-| `>=`, `>`, `<=`, `<` followed by a version | comparison                        |
-| `*`                 | any version                                              |
-
-Versions in constraints may omit minor and patch (`^1` = `^1.0.0`). Versions published to the registry may have a leading `v` (from git
-tags), which is ignored. Pre-releases sort before their release.
 
 ## `spice.lock`
 
@@ -267,54 +192,17 @@ does not use a shell; arguments are passed to the programs directly.
 
 ## Editing by Shaker
 
-`install` and `uninstall` change the manifest. They must keep it as the user wrote it: comments, blank lines, key order and formatting of
-every line that is not affected.
-
-**Reading.** The file is parsed with `parseToml` from `std/text/toml/toml-parser`, and the resulting tree is [validated](#validation).
-Additionally, a line scanner locates each dependency line. The scanner
-
-- skips the contents of multi-line strings (`"""` and `'''`),
-- recognizes table headers (`[name]` and `[[name]]`, optionally followed by a comment), and
-- inside `[dependencies]` and `[dev-dependencies]` recognizes lines of the form `<bare key> = <value> [# comment]`, using a small
-  lexer (basic strings with escapes, literal strings, braces and brackets) to find where the value ends and the comment begins.
-
-Every dependency in the parsed tree must be found by the scanner in the matching section; if one is not, the manifest violates the
-[format restriction](#dependencies) and is rejected.
-
-**Writing.** The parsed tree is not serialized back. Instead, the original text is edited line by line:
-
-- The value of a dependency is formatted from `TomlValue`s with `TomlSerializer.serializeValue`: a string for the short form, or
-  `{ key = value, ... }` with the keys in the order `version`, `github`, `rev`, `path`.
-- **Changing** a dependency replaces the value of its line and keeps the comment at the end of the line.
-- **Adding** a dependency inserts `name = value` after the last dependency line of the section, or directly after the section header
-  if the section is empty. If the section does not exist, a blank line, the header and the dependency line are appended to the end of the
-  file.
-- **Removing** a dependency deletes its line.
-- Moving a dependency between `[dependencies]` and `[dev-dependencies]` is a removal followed by an addition.
-
-**Verification.** The edited text is parsed and validated again, and the file is only written if the result contains exactly the
-intended dependencies. This guards against bugs in the line editing.
+`install` and `uninstall` change the manifest. They keep it as the user wrote it (comments, blank lines, key order and formatting of
+every line that is not affected) by editing the dependency lines in place, as specified in
+[Editing](https://github.com/spicelang/packages/blob/main/packages/manifest/README.md#editing) of the manifest package. The edited text is validated again, and the file is only written if the result
+contains exactly the intended dependencies.
 
 `init` and the lock file have no user content to preserve; they are written with `TomlSerializer`.
 
 ## Validation
 
-A manifest is rejected if any of the following holds. The error message names the file, the table and the key; for an unknown key it
-suggests the known key with the smallest edit distance, if that distance is at most 2.
-
-- It is not valid TOML.
-- `[package]`, `package.name` or `package.version` is missing.
-- A value has the wrong type.
-- There is an unknown key at the top level, in `[package]` or in a dependency specification.
-- `name` or a dependency name is not a valid [name](#names).
-- `version` is not valid SemVer, or a constraint (`spice`, a dependency `version`) is not a valid [constraint](#version-constraints).
-- `entry` violates the rules of [`[package]`](#package).
-- A dependency specification has no source, more than one source, or `rev` without `github`.
-- `github` is not `owner/repo` (letters, digits, `-`, `_` and `.` each), or `rev` contains characters other than letters, digits, `-`,
-  `_`, `.` and `/`.
-- `path` is empty or contains `\`.
-- A name is in both `[dependencies]` and `[dev-dependencies]`.
-- The [format restriction](#dependencies) is violated.
+Shaker rejects a manifest that violates the [validation rules](https://github.com/spicelang/packages/blob/main/packages/manifest/README.md#validation) of the manifest package, with its messages
+(the file, the table and the key, and for an unknown key a suggestion of the known key with the smallest edit distance).
 
 ## Commands
 
@@ -346,15 +234,3 @@ A repository can hold several packages, each in a directory with its own `spice.
 from that directory, takes the releases whose tag starts with the directory (full path or last segment) and `-`, `/` or `@`
 (`github-v1.0.0`, `github/v1.0.0`, `github@1.0.0`, `packages/github/v1.0.0`), takes the description from `[package]` of the
 manifest and reports the directory as `path` in its API.
-
-## Out of scope
-
-The format leaves room for these, but this version does not specify them:
-
-- **Workspaces**: multiple packages sharing one `spice.lock` and `spice_packages/` (`[workspace]` table).
-- **Target-specific dependencies**, e.g. `[target.windows.dependencies]`.
-- **Features and optional dependencies**: `optional = true` in the detailed form, plus a `[features]` table.
-- **Renaming**: installing a registry package under another dependency name (a `package` key in the detailed form).
-- **Import by package name**: `import "@json-parser";` resolving to the `entry` of the package. `entry` is specified now so that the
-  compiler can add this later without a format change.
-- **Scripts / tasks** (npm `scripts`). These can live under `[tool.<name>]` for now.
