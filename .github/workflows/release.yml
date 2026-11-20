@@ -20,7 +20,7 @@ env:
 jobs:
   check-version:
     name: Check version
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -209,7 +209,7 @@ jobs:
   release:
     name: Create release
     needs: build
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     permissions:
       contents: write
     steps:
